@@ -1,0 +1,8 @@
+quart
+asyncpg
+python-dotenv
+passlib
+bcrypt==3.2.0
+pyjwt
+quart-cors
+supabase
