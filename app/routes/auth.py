@@ -8,10 +8,21 @@ from quart.utils import run_sync
 
 auth_bp = Blueprint("auth", __name__)
 
-
-# Registro de usuario
+# Registro
 @auth_bp.route("/register", methods=["POST"])
 async def register():
+    """Los campos requeridos para registrar son estos:
+    {
+    "email": "ejemplo@mail.com",
+    "password": "123456",
+    "confirm_password": "123456",
+    "first_name": "Juan",
+    "last_name": "Pérez",
+    "dni": 12345678,
+    "phone_number": "1234567890",
+    "workshop_id": 1,
+    "user_type_id": 2
+    }"""
     data = await request.get_json()
     email = data.get("email")
     password = data.get("password")
@@ -20,10 +31,12 @@ async def register():
     last_name = data.get("last_name")
     dni = data.get("dni")
     phone_number = data.get("phone_number")
-    user_type = data.get("user_type", 4)
 
-    if not email or not password or not confirm_password or not first_name or not last_name:
-        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+    workshop_id = data.get("workshop_id")
+    user_type_id = data.get("user_type_id")
+
+    if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
+        return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
 
     if password != confirm_password:
         return jsonify({"error": "Las contraseñas no coinciden"}), 400
@@ -34,15 +47,27 @@ async def register():
         return jsonify({"error": "El email ya está en uso"}), 400
 
     hashed_password = bcrypt.hash(password)
-    await conn.execute(
-        """
-        INSERT INTO users (email, first_name, last_name, phone_number, dni, password, user_type, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-        """,
-        email, first_name, last_name, phone_number, dni, hashed_password, user_type
-    )
 
-    return jsonify({"message": "Usuario registrado correctamente"}), 201
+    async with conn.transaction():
+        user_row = await conn.fetchrow(
+            """
+            INSERT INTO users (email, first_name, last_name, phone_number, dni, password, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+            RETURNING id
+            """,
+            email, first_name, last_name, phone_number, dni, hashed_password
+        )
+        user_id = user_row["id"]
+
+        await conn.execute(
+            """
+            INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            """,
+            workshop_id, user_id, user_type_id
+        )
+
+    return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
 
 
 # Login
@@ -105,16 +130,26 @@ async def me():
 
     conn = await get_conn()
     user = await conn.fetchrow("""
-        SELECT u.id, u.email, u.first_name, u.last_name, u.phone_number, u.avatar, ut.name AS user_type_name
-        FROM users u
-        LEFT JOIN user_types ut ON u.user_type = ut.id
-        WHERE u.id = $1
+        SELECT id, email, first_name, last_name, phone_number, avatar
+        FROM users
+        WHERE id = $1
     """, user_id)
 
     if not user:
         return jsonify({"error": "Usuario no encontrado"}), 404
 
-    return jsonify({"user": dict(user)})
+    workshops = await conn.fetch("""
+        SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role
+        FROM workshop_users wu
+        JOIN workshop w ON wu.workshop_id = w.id
+        JOIN user_types ut ON wu.user_type_id = ut.id
+        WHERE wu.user_id = $1
+    """, user_id)
+
+    return jsonify({
+        "user": dict(user),
+        "workshops": [dict(w) for w in workshops]
+    })
 
 
 # Logout
