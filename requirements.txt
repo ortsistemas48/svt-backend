@@ -6,3 +6,6 @@ bcrypt==3.2.0
 pyjwt
 quart-cors
 supabase
+pytest
+pytest-asyncio
+httpx
