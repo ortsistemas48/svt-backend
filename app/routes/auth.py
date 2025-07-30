@@ -74,14 +74,16 @@ async def register():
 @auth_bp.route("/login", methods=["POST"])
 async def login():
     data = await request.get_json()
-    email = data.get("email")
+    identifier = data.get("email")
     password = data.get("password")
 
-    if not email or not password:
-        return jsonify({"error": "Email y contraseña requeridos"}), 400
+    if not identifier or not password:
+        return jsonify({"error": "Email o DNI y contraseña requeridos"}), 400
 
     conn = await get_conn()
-    user = await conn.fetchrow("SELECT * FROM users WHERE email = $1", email)
+    user = await conn.fetchrow(
+        "SELECT * FROM users WHERE email = $1 OR dni = $1", identifier
+    )
 
     if not user or not bcrypt.verify(password, user["password"]):
         return jsonify({"error": "Credenciales inválidas"}), 401
