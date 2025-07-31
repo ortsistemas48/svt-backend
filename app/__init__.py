@@ -8,11 +8,12 @@ import os
 def create_app():
     app = Quart(__name__)
     app.config.from_mapping(load_config())
-    app = cors(app, allow_origin="http://localhost:3000", allow_credentials=True)
 
     @app.before_serving
     async def startup():
         await init_db()
 
     register_routes(app)
+
+    app = cors(app, allow_origin="http://localhost:3000", allow_credentials=True)
     return app
