@@ -1,6 +1,6 @@
 from quart import Blueprint, request, jsonify, current_app, g
 from passlib.hash import bcrypt
-from app.db import get_conn
+from app.db import get_conn, get_conn_ctx
 import jwt
 import datetime
 from quart.wrappers.response import Response
@@ -130,23 +130,23 @@ async def me():
     except jwt.InvalidTokenError:
         return jsonify({"error": "Token inválido"}), 401
 
-    conn = await get_conn()
-    user = await conn.fetchrow("""
-        SELECT id, email, first_name, last_name, phone_number, avatar
-        FROM users
-        WHERE id = $1
-    """, user_id)
+    async with get_conn_ctx() as conn:
+        user = await conn.fetchrow("""
+            SELECT id, email, first_name, last_name, phone_number, avatar
+            FROM users
+            WHERE id = $1
+        """, user_id)
 
-    if not user:
-        return jsonify({"error": "Usuario no encontrado"}), 404
+        if not user:
+            return jsonify({"error": "Usuario no encontrado"}), 404
 
-    workshops = await conn.fetch("""
-        SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role
-        FROM workshop_users wu
-        JOIN workshop w ON wu.workshop_id = w.id
-        JOIN user_types ut ON wu.user_type_id = ut.id
-        WHERE wu.user_id = $1
-    """, user_id)
+        workshops = await conn.fetch("""
+            SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role
+            FROM workshop_users wu
+            JOIN workshop w ON wu.workshop_id = w.id
+            JOIN user_types ut ON wu.user_type_id = ut.id
+            WHERE wu.user_id = $1
+        """, user_id)
 
     return jsonify({
         "user": dict(user),

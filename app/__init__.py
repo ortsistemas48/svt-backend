@@ -1,9 +1,10 @@
-from quart import Quart
+from quart import Quart, request, g, current_app
 from .config import load_config
 from .db import init_db
 from .routes import register_routes
 from quart_cors import cors
 import os
+import jwt
 
 def create_app():
     app = Quart(__name__)
@@ -12,6 +13,20 @@ def create_app():
     @app.before_serving
     async def startup():
         await init_db()
+
+    @app.before_request
+    async def load_user():
+        token = request.cookies.get("token")
+        g.user_id = None  # Siempre lo inicializamos por las dudas
+
+        if not token:
+            return
+
+        try:
+            payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+            g.user_id = payload.get("user_id")
+        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            pass
 
     register_routes(app)
 

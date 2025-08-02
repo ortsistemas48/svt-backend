@@ -1,5 +1,6 @@
 import asyncpg
 import os 
+from contextlib import asynccontextmanager
 
 db_pool = None
 
@@ -21,3 +22,12 @@ async def get_conn():
         raise Exception("DB pool no inicializado. ¿Llamaste a init_db()?")
 
     return await db_pool.acquire()
+
+
+@asynccontextmanager
+async def get_conn_ctx():
+    conn = await db_pool.acquire()
+    try:
+        yield conn
+    finally:
+        await db_pool.release(conn)
