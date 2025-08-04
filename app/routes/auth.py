@@ -132,7 +132,7 @@ async def me():
 
     async with get_conn_ctx() as conn:
         user = await conn.fetchrow("""
-            SELECT id, email, first_name, last_name, phone_number, avatar
+            SELECT id, email, first_name, last_name, phone_number, avatar, is_admin
             FROM users
             WHERE id = $1
         """, user_id)
@@ -141,7 +141,7 @@ async def me():
             return jsonify({"error": "Usuario no encontrado"}), 404
 
         workshops = await conn.fetch("""
-            SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role
+            SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role, wu.user_type_id
             FROM workshop_users wu
             JOIN workshop w ON wu.workshop_id = w.id
             JOIN user_types ut ON wu.user_type_id = ut.id

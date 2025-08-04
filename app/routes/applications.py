@@ -10,19 +10,24 @@ applications_bp = Blueprint("applications", __name__)
 @applications_bp.route("/applications", methods=["POST"])
 async def create_application():
     user_id = g.get("user_id")
-    print(user_id)
-    
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
+    data = await request.get_json()
+    workshop_id = data.get("workshop_id")
+
+    if not workshop_id:
+        return jsonify({"error": "Falta el workshop_id"}), 400
+
     conn = await get_conn()
-    
+
     result = await conn.fetchrow("""
-        INSERT INTO applications (user_id, date)
-        VALUES ($1, $2)
+        INSERT INTO applications (user_id, workshop_id, date)
+        VALUES ($1, $2, $3)
         RETURNING id
-    """, user_id, datetime.datetime.utcnow())
-    await conn.close() 
+    """, user_id, int(workshop_id), datetime.datetime.utcnow())
+
+    await conn.close()
     application_id = result["id"]
 
     return jsonify({"message": "Trámite iniciado", "application_id": application_id}), 201
@@ -283,3 +288,46 @@ async def get_application_full(id):
         "driver": dict(driver) if driver else None,
         "car": dict(car) if car else None
     }), 200
+
+
+@applications_bp.route("/workshop/<int:workshop_id>/full", methods=["GET"])
+async def list_full_applications_by_workshop(workshop_id):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    conn = await get_conn()
+
+    applications = await conn.fetch("""
+        SELECT id, user_id, owner_id, driver_id, car_id, date, status
+        FROM applications
+        WHERE workshop_id = $1
+        ORDER BY date DESC
+    """, workshop_id)
+
+    result = []
+
+    for app in applications:
+        owner = None
+        driver = None
+        car = None
+
+        if app["owner_id"]:
+            owner = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", app["owner_id"])
+        if app["driver_id"]:
+            driver = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", app["driver_id"])
+        if app["car_id"]:
+            car = await conn.fetchrow("SELECT * FROM cars WHERE id = $1", app["car_id"])
+
+        result.append({
+            "application_id": app["id"],
+            "user_id": app["user_id"],
+            "date": app["date"].isoformat() if app["date"] else None,
+            "status": app.get("status"),
+            "owner": dict(owner) if owner else None,
+            "driver": dict(driver) if driver else None,
+            "car": dict(car) if car else None
+        })
+
+    await conn.close()
+    return jsonify(result), 200
