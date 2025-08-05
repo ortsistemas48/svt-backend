@@ -247,18 +247,6 @@ async def get_application(id):
     return jsonify(dict(application)), 200
 
 
-@applications_bp.route("/<app_id>/confirm", methods=["PUT"])
-async def confirm_application(app_id):
-    data = await request.get_json()
-    conn = await get_conn()
-
-    
-    await conn.execute("UPDATE applications SET date = $1 WHERE id = $2", data["date"], app_id)
-    await conn.close()
-
-    return jsonify({"message": "Trámite confirmado"}), 200
-
-
 @applications_bp.route("/<int:id>/data", methods=["GET"])
 async def get_application_full(id):
     user_id = g.get("user_id")
@@ -340,3 +328,26 @@ async def list_full_applications_by_workshop(workshop_id):
 
     await conn.close()
     return jsonify(result), 200
+
+
+@applications_bp.route("/<int:app_id>/queue", methods=["POST"])
+async def enqueue_application(app_id):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+    
+    conn = await get_conn()
+
+    application = await conn.fetchrow(
+        "SELECT id FROM applications WHERE id = $1",
+        app_id
+    )
+    if not application:
+        return jsonify({"error": "Trámite no encontrado o sin permiso"}), 404
+
+    await conn.execute(
+        "UPDATE applications SET status = $1 WHERE id = $2",
+        "En Cola", app_id
+    )
+
+    return jsonify({"message": "Trámite enviado a la cola"}), 200
