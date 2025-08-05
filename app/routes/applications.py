@@ -119,8 +119,16 @@ async def add_or_update_car(app_id):
     owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
     driver_id = await conn.fetchval("SELECT driver_id FROM applications WHERE id = $1", app_id)
     
-    green_card_expiration = parser.parse(data["green_card_expiration"]).date()
-    license_expiration = parser.parse(data["license_expiration"]).date()
+    green_card_expiration = (
+        parser.parse(data["green_card_expiration"]).date()
+        if "green_card_expiration" in data and data["green_card_expiration"]
+        else None
+    )
+    license_expiration = (
+        parser.parse(data["license_expiration"]).date()
+        if "license_expiration" in data and data["license_expiration"]
+        else None
+    )
 
     if not owner_id or not driver_id:
         await conn.close()
@@ -145,7 +153,7 @@ async def add_or_update_car(app_id):
                 $18
             )
             RETURNING id
-        """, data["license_plate"], data["brand"], data["model"], data["fuel_type"], data["weight"],
+        """, data.get("license_plate"), data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
              data.get("manufacture_year"), data.get("engine_brand"), data.get("engine_number"),
              data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
              green_card_expiration, data.get("license_number"), license_expiration,
@@ -244,6 +252,7 @@ async def confirm_application(app_id):
     data = await request.get_json()
     conn = await get_conn()
 
+    
     await conn.execute("UPDATE applications SET date = $1 WHERE id = $2", data["date"], app_id)
     await conn.close()
 
