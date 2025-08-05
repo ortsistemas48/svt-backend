@@ -101,7 +101,6 @@ async def login():
             "email": user["email"],
             "first_name": user["first_name"],
             "last_name": user["last_name"],
-            "avatar": user["avatar"]
         }
     })
 
@@ -132,7 +131,7 @@ async def me():
 
     async with get_conn_ctx() as conn:
         user = await conn.fetchrow("""
-            SELECT id, email, first_name, last_name, phone_number, avatar, is_admin
+            SELECT id, email, first_name, last_name, phone_number, is_admin
             FROM users
             WHERE id = $1
         """, user_id)
@@ -160,3 +159,64 @@ async def logout():
     response: Response = await run_sync(jsonify)({"message": "Sesión cerrada correctamente"})
     response.delete_cookie("token")
     return response
+
+
+@auth_bp.route("/<int:user_id>", methods=["PUT"])
+async def update_user(user_id):
+    token = request.cookies.get("token")
+    if not token:
+        return jsonify({"error": "No autenticado"}), 401
+
+    try:
+        payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    data = await request.get_json()
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    phone_number = data.get("phone_number")
+
+    if not any([first_name, last_name, phone_number]):
+        return jsonify({"error": "No se enviaron campos para actualizar"}), 400
+
+    async with get_conn_ctx() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        if not user:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+
+        await conn.execute("""
+            UPDATE users
+            SET first_name = COALESCE($1, first_name),
+                last_name = COALESCE($2, last_name),
+                phone_number = COALESCE($3, phone_number)
+            WHERE id = $5
+        """, first_name, last_name, phone_number, user_id)
+
+    return jsonify({"message": "Usuario actualizado correctamente"})
+
+
+@auth_bp.route("/<int:user_id>", methods=["DELETE"])
+async def delete_user(user_id):
+    token = request.cookies.get("token")
+    if not token:
+        return jsonify({"error": "No autenticado"}), 401
+
+    try:
+        payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    async with get_conn_ctx() as conn:
+        user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
+        if not user:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+
+        await conn.execute("DELETE FROM workshop_users WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+
+    return jsonify({"message": "Usuario eliminado correctamente"})
