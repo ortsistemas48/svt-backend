@@ -3,7 +3,23 @@ from app.db import get_conn
 
 users_bp = Blueprint("users", __name__, url_prefix="/users")
 
-# Obtener talleres de un usuario por su ID
+
+@users_bp.route("/get_users/workshop/<int:workshop_id>", methods=["GET"])
+async def get_users_in_workshop(workshop_id: int):
+    conn = await get_conn()
+    users = await conn.fetch("""
+        SELECT u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number, ut.name AS role
+        FROM workshop_users wu
+        JOIN users u ON wu.user_id = u.id
+        JOIN user_types ut ON wu.user_type_id = ut.id
+        WHERE wu.workshop_id = $1;
+    """, workshop_id)
+
+    return jsonify({
+        "workshop_id": workshop_id,
+        "users": [dict(user) for user in users]
+    })
+
 @users_bp.route("/<int:user_id>/workshops", methods=["GET"])
 async def get_user_workshops(user_id: int):
     conn = await get_conn()
@@ -22,7 +38,7 @@ async def get_user_workshops(user_id: int):
     })
 
 
-@users_bp.route("/<int:user_id>/workshops/<int:workshop_id>/role", methods=["GET"])
+@users_bp.route("/<int:user_id>/workshops/<int:work_ishopd>/role", methods=["GET"])
 async def get_user_role_in_workshop(user_id: int, workshop_id: int):
     conn = await get_conn()
 
