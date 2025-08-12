@@ -337,3 +337,66 @@ async def enqueue_application(app_id):
         )
 
     return jsonify({"message": "Trámite enviado a la cola"}), 200
+
+@applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
+async def list_completed_applications_by_workshop(workshop_id: int):
+    """
+    Devuelve las applications del workshop con status = 'Completado',
+    incluyendo owner, driver y car cuando existan.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        # 1) Traer solo las applications completadas
+        applications = await conn.fetch(
+            """
+            SELECT id, user_id, owner_id, driver_id, car_id, date, status, result
+            FROM applications
+            WHERE workshop_id = $1
+              AND status = 'Completado'
+            ORDER BY date DESC
+            """,
+            workshop_id,
+        )
+
+        # 2) Enriquecer con owner/driver/car (mismo patrón que el endpoint full)
+        result = []
+
+        for app in applications:
+            owner = None
+            driver = None
+            car = None
+
+            if app["owner_id"]:
+                owner = await conn.fetchrow(
+                    "SELECT * FROM persons WHERE id = $1", app["owner_id"]
+                )
+            if app["driver_id"]:
+                driver = await conn.fetchrow(
+                    "SELECT * FROM persons WHERE id = $1", app["driver_id"]
+                )
+            if app["car_id"]:
+                car = await conn.fetchrow(
+                    "SELECT * FROM cars WHERE id = $1", app["car_id"]
+                )
+
+            # Estructura compatible con el front actual
+            result.append(
+                {
+                    "application_id": app["id"],
+                    "user_id": app["user_id"],
+                    "date": app["date"].isoformat() if app["date"] else None,
+                    "status": app.get("status"),   # mismo uso que tu endpoint full
+                    "result": app.get("result"),
+                    # Si más adelante agregás una columna "result" en applications,
+                    # esta línea la podés habilitar:
+                    # "result": app.get("result"),
+                    "owner": dict(owner) if owner else None,
+                    "driver": dict(driver) if driver else None,
+                    "car": dict(car) if car else None,
+                }
+            )
+
+    return jsonify(result), 200
