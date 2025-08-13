@@ -275,46 +275,164 @@ async def get_application_full(id):
         "car": dict(car) if car else None
     }), 200
 
+from quart import request, jsonify, g
 
 @applications_bp.route("/workshop/<int:workshop_id>/full", methods=["GET"])
-async def list_full_applications_by_workshop(workshop_id):
+async def list_full_applications_by_workshop(workshop_id: int):
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
+    # --- Query params ---
+    try:
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("per_page", 10))
+        page = max(1, page)
+        per_page = max(1, min(per_page, 100))  # cap de seguridad
+    except ValueError:
+        return jsonify({"error": "Parámetros inválidos"}), 400
+
+    q = (request.args.get("q") or "").strip()
+    status_in_raw = (request.args.get("status_in") or "").strip()
+    status_list = [s.strip() for s in status_in_raw.split(",") if s.strip()]
+    offset = (page - 1) * per_page
+
+    # --- Filtros dinámicos ---
+    filters = ["a.workshop_id = $1"]
+    params = [workshop_id]
+
+    # Búsqueda (patrón similar a tu front)
+    if q:
+        filters.append("""
+            (
+                c.license_plate ILIKE $2 OR
+                o.first_name     ILIKE $2 OR
+                o.last_name      ILIKE $2 OR
+                o.dni::text      ILIKE $2
+            )
+        """)
+        params.append(f"%{q}%")
+
+    # Filtro de estado opcional: status_in=En Cola,En curso
+    if status_list:
+        filters.append(f"a.status = ANY(${len(params)+1}::text[])")
+        params.append(status_list)
+
+    # ---- Filtro "no vacío" (equivalente a isDataEmpty) ----
+    # Se excluyen aplicaciones donde car Y owner están vacíos (ignorando id/is_owner/owner_id/driver_id).
+    # Consideramos "no vacío":
+    #   car: license_plate/brand/model con texto no vacío
+    #   owner: first_name/last_name con texto no vacío o dni no nulo
+    filters.append("""
+        (
+            ( NULLIF(trim(c.license_plate), '') IS NOT NULL
+              OR NULLIF(trim(c.brand), '')         IS NOT NULL
+              OR NULLIF(trim(c.model), '')         IS NOT NULL )
+        )
+        OR
+        (
+            ( NULLIF(trim(o.first_name), '') IS NOT NULL
+              OR NULLIF(trim(o.last_name), '')  IS NOT NULL
+              OR o.dni IS NOT NULL )
+        )
+    """)
+
+    where_sql = " AND ".join(f"({f.strip()})" for f in filters)
+
     async with get_conn_ctx() as conn:
-        applications = await conn.fetch("""
-            SELECT id, user_id, owner_id, driver_id, car_id, date, status
-            FROM applications
-            WHERE workshop_id = $1
-            ORDER BY date DESC
-        """, workshop_id)
+        # --- Total para paginación ---
+        total = await conn.fetchval(
+            f"""
+            SELECT COUNT(*)
+            FROM applications a
+            LEFT JOIN persons o ON a.owner_id = o.id
+            LEFT JOIN cars    c ON a.car_id   = c.id
+            WHERE {where_sql}
+            """,
+            *params
+        )
 
-        result = []
+        # --- Página de items ---
+        limit_idx  = len(params) + 1
+        offset_idx = len(params) + 2
 
-        for app in applications:
-            owner = None
-            driver = None
-            car = None
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                a.id,
+                a.user_id,
+                a.date,
+                a.status,
+                -- Owner mínimo
+                o.first_name  AS owner_first_name,
+                o.last_name   AS owner_last_name,
+                o.dni         AS owner_dni,
+                -- Driver mínimo (si lo necesitás en UI, lo dejamos también)
+                d.first_name  AS driver_first_name,
+                d.last_name   AS driver_last_name,
+                d.dni         AS driver_dni,
+                -- Car mínimo
+                c.license_plate,
+                c.brand,
+                c.model
+            FROM applications a
+            LEFT JOIN persons o ON a.owner_id = o.id
+            LEFT JOIN persons d ON a.driver_id = d.id
+            LEFT JOIN cars    c ON a.car_id   = c.id
+            WHERE {where_sql}
+            ORDER BY a.date DESC NULLS LAST
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+            """,
+            *params, per_page, offset
+        )
 
-            if app["owner_id"]:
-                owner = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", app["owner_id"])
-            if app["driver_id"]:
-                driver = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", app["driver_id"])
-            if app["car_id"]:
-                car = await conn.fetchrow("SELECT * FROM cars WHERE id = $1", app["car_id"])
+    items = []
+    for r in rows:
+        items.append({
+            "application_id": r["id"],
+            "user_id": r["user_id"],
+            "date": r["date"].isoformat() if r["date"] else None,
+            "status": r["status"],
+            "owner": (
+                {
+                    "first_name": r["owner_first_name"],
+                    "last_name":  r["owner_last_name"],
+                    "dni":        r["owner_dni"],
+                }
+                if (r["owner_first_name"] or r["owner_last_name"] or r["owner_dni"] is not None)
+                else None
+            ),
+            "driver": (
+                {
+                    "first_name": r["driver_first_name"],
+                    "last_name":  r["driver_last_name"],
+                    "dni":        r["driver_dni"],
+                }
+                if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
+                else None
+            ),
+            "car": (
+                {
+                    "license_plate": r["license_plate"],
+                    "brand":         r["brand"],
+                    "model":         r["model"],
+                }
+                if (
+                    (r["license_plate"] and r["license_plate"].strip())
+                    or (r["brand"] and r["brand"].strip())
+                    or (r["model"] and r["model"].strip())
+                )
+                else None
+            ),
+        })
 
-            result.append({
-                "application_id": app["id"],
-                "user_id": app["user_id"],
-                "date": app["date"].isoformat() if app["date"] else None,
-                "status": app.get("status"),
-                "owner": dict(owner) if owner else None,
-                "driver": dict(driver) if driver else None,
-                "car": dict(car) if car else None
-            })
+    return jsonify({
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page
+    }), 200
 
-    return jsonify(result), 200
 
 
 @applications_bp.route("/<int:app_id>/queue", methods=["POST"])
