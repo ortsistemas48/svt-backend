@@ -102,90 +102,95 @@ async def add_or_update_driver(app_id):
     return jsonify({"message": "Conductor guardado"}), 200
 
 
-# Paso 4: Agregar o editar auto (relacionado con owner y driver actuales)
+# Paso 4: Agregar o reutilizar auto por patente, luego vincular a la application
 @applications_bp.route("/<app_id>/car", methods=["PUT"])
 async def add_or_update_car(app_id):
     data = await request.get_json()
-    app_id = int(app_id)  
+    app_id = int(app_id)
+
+    def normalize_plate(p):
+        if not p:
+            return None
+        return str(p).strip().upper().replace("-", "").replace(" ", "")
+
+    license_plate = normalize_plate(data.get("license_plate"))
+
+    green_card_expiration = (
+        parser.parse(data["green_card_expiration"]).date()
+        if data.get("green_card_expiration") else None
+    )
+    license_expiration = (
+        parser.parse(data["license_expiration"]).date()
+        if data.get("license_expiration") else None
+    )
+
     async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("""
+                SELECT owner_id, driver_id
+                FROM applications
+                WHERE id = $1
+                FOR UPDATE
+            """, app_id)
 
-        car_id = await conn.fetchval("SELECT car_id FROM applications WHERE id = $1", app_id)
-        owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
-        driver_id = await conn.fetchval("SELECT driver_id FROM applications WHERE id = $1", app_id)
-        
-        green_card_expiration = (
-            parser.parse(data["green_card_expiration"]).date()
-            if "green_card_expiration" in data and data["green_card_expiration"]
-            else None
-        )
-        license_expiration = (
-            parser.parse(data["license_expiration"]).date()
-            if "license_expiration" in data and data["license_expiration"]
-            else None
-        )
+            if not row or not row["owner_id"] or not row["driver_id"]:
+                return jsonify({"error": "Faltan owner o driver, deben agregarse antes"}), 400
 
-        if not owner_id or not driver_id:
-            await conn.close()
-            return jsonify({"error": "Faltan owner o driver. Deben agregarse antes"}), 400
+            owner_id = row["owner_id"]
+            driver_id = row["driver_id"]
 
-        if not car_id:
+            if not license_plate:
+                return jsonify({"error": "Falta license_plate"}), 400
+
             car_id = await conn.fetchval("""
                 INSERT INTO cars (
                     license_plate, brand, model, fuel_type, weight,
                     manufacture_year, engine_brand, engine_number,
                     chassis_number, chassis_brand, green_card_number,
                     green_card_expiration, license_number, license_expiration,
-                    vehicle_type, usage_type,
-                    owner_id, driver_id
+                    vehicle_type, usage_type, owner_id, driver_id
                 )
                 VALUES (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8,
                     $9, $10, $11,
                     $12, $13, $14,
-                    $15, $16, $17,
-                    $18
+                    $15, $16, $17, $18
                 )
+                ON CONFLICT (license_plate) DO UPDATE SET
+                    brand = COALESCE(EXCLUDED.brand, cars.brand),
+                    model = COALESCE(EXCLUDED.model, cars.model),
+                    fuel_type = COALESCE(EXCLUDED.fuel_type, cars.fuel_type),
+                    weight = COALESCE(EXCLUDED.weight, cars.weight),
+                    manufacture_year = COALESCE(EXCLUDED.manufacture_year, cars.manufacture_year),
+                    engine_brand = COALESCE(EXCLUDED.engine_brand, cars.engine_brand),
+                    engine_number = COALESCE(EXCLUDED.engine_number, cars.engine_number),
+                    chassis_number = COALESCE(EXCLUDED.chassis_number, cars.chassis_number),
+                    chassis_brand = COALESCE(EXCLUDED.chassis_brand, cars.chassis_brand),
+                    green_card_number = COALESCE(EXCLUDED.green_card_number, cars.green_card_number),
+                    green_card_expiration = COALESCE(EXCLUDED.green_card_expiration, cars.green_card_expiration),
+                    license_number = COALESCE(EXCLUDED.license_number, cars.license_number),
+                    license_expiration = COALESCE(EXCLUDED.license_expiration, cars.license_expiration),
+                    vehicle_type = COALESCE(EXCLUDED.vehicle_type, cars.vehicle_type),
+                    usage_type = COALESCE(EXCLUDED.usage_type, cars.usage_type),
+                    owner_id = COALESCE(EXCLUDED.owner_id, cars.owner_id),
+                    driver_id = COALESCE(EXCLUDED.driver_id, cars.driver_id)
                 RETURNING id
-            """, data.get("license_plate"), data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
-                data.get("manufacture_year"), data.get("engine_brand"), data.get("engine_number"),
-                data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
-                green_card_expiration, data.get("license_number"), license_expiration,
-                data.get("vehicle_type"), data.get("usage_type"), 
-                owner_id, driver_id)
+            """,
+            license_plate, data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
+            data.get("manufacture_year"), data.get("engine_brand"), data.get("engine_number"),
+            data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
+            green_card_expiration, data.get("license_number"), license_expiration,
+            data.get("vehicle_type"), data.get("usage_type"),
+            owner_id, driver_id)
 
-            await conn.execute("UPDATE applications SET car_id = $1 WHERE id = $2", car_id, app_id)
-
-        else:
             await conn.execute("""
-                UPDATE cars SET
-                    license_plate = $1,
-                    brand = $2,
-                    model = $3,
-                    fuel_type = $4,
-                    weight = $5,
-                    manufacture_year = $6,
-                    engine_brand = $7,
-                    engine_number = $8,
-                    chassis_number = $9,
-                    chassis_brand = $10,
-                    green_card_number = $11,
-                    green_card_expiration = $12,
-                    license_number = $13,
-                    license_expiration = $14,
-                    vehicle_type = $15,
-                    usage_type = $16,
-                    owner_id = $17,
-                    driver_id = $18
-                WHERE id = $19
-            """, data.get("license_plate"), data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
-                data.get("manufacture_year"), data.get("engine_brand"), data.get("engine_number"),
-                data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
-                green_card_expiration, data.get("license_number"), license_expiration,
-                data.get("vehicle_type"), data.get("usage_type"),
-                owner_id, driver_id, car_id)
+                UPDATE applications
+                SET car_id = $1
+                WHERE id = $2
+            """, car_id, app_id)
 
-    return jsonify({"message": "Vehículo guardado"}), 200
+    return jsonify({"message": "Vehículo vinculado a la aplicación", "car_id": car_id}), 200
 
 
 # Paso 5: Editar cualquier dato del trámite (application)
