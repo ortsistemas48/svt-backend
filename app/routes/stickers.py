@@ -16,13 +16,14 @@ async def list_available_stickers():
     workshop_id = request.args.get("workshop_id", type=int)
     current_car_id = request.args.get("current_car_id", type=int)
     current_plate = _norm_plate(request.args.get("current_license_plate"))
-    print(workshop_id, current_car_id, current_plate)
+
     if not workshop_id:
         return jsonify({"error": "workshop_id requerido"}), 400
 
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(
             """
+            -- 1) Obleas disponibles del taller (vigentes y no asignadas a otro auto)
             SELECT
               s.id,
               s.sticker_number,
@@ -35,22 +36,51 @@ async def list_available_stickers():
               so.workshop_id = $1
               AND (s.status IS NULL OR s.status IN ('vigente'))
               AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
-
               AND NOT EXISTS (
                 SELECT 1
                 FROM cars c
                 WHERE c.sticker_id = s.id
                   AND NOT (
-                        ($2::int  IS NOT NULL AND c.id = $2)
-                     OR ($3::text IS NOT NULL AND UPPER(regexp_replace(c.license_plate, '[-\\s]', '', 'g')) = $3)
+                        ($2::int  IS NOT NULL AND c.id = $2) OR
+                        ($3::text IS NOT NULL AND UPPER(regexp_replace(c.license_plate, '[-\\s]', '', 'g')) = $3)
                   )
               )
-            ORDER BY s.id DESC
+
+            UNION
+
+            -- 2) La oblea actualmente asignada al auto (de cualquier taller)
+            SELECT
+              s2.id,
+              s2.sticker_number,
+              s2.expiration_date,
+              s2.issued_at,
+              s2.status
+            FROM stickers s2
+            WHERE EXISTS (
+              SELECT 1
+              FROM cars c2
+              WHERE c2.sticker_id = s2.id
+                AND (
+                      ($2::int  IS NOT NULL AND c2.id = $2) OR
+                      ($3::text IS NOT NULL AND UPPER(regexp_replace(c2.license_plate, '[-\\s]', '', 'g')) = $3)
+                    )
+            )
+
+            ORDER BY id DESC
             """,
             workshop_id, current_car_id, current_plate
         )
 
-    return jsonify([dict(r) for r in rows])
+    # Serializamos fechas si vienen como date/datetime
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("expiration_date", "issued_at"):
+            if d.get(k) is not None and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        out.append(d)
+
+    return jsonify(out), 200
 
 
 @stickers_bp.route("/<int:sticker_id>", methods=["GET"])

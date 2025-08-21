@@ -33,7 +33,8 @@ async def get_vehicle_data(license_plate: str):
                 vehicle_type,
                 usage_type,
                 owner_id,
-                driver_id
+                driver_id,
+                sticker_id
             FROM cars
             WHERE LOWER(license_plate) = LOWER($1)
             """,

@@ -256,7 +256,7 @@ async def get_application(id):
 
     async with get_conn_ctx() as conn:
         application = await conn.fetchrow("""
-            SELECT id, user_id, date
+            SELECT id, user_id, date, workshop_id, status, result
             FROM applications
             WHERE id = $1 AND user_id = $2
         """, id, user_id)
