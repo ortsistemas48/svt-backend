@@ -15,8 +15,35 @@ async def create_workshop():
 
     data = await request.get_json()
     name = (data.get("name") or "").strip()
-    if not name:
-        return jsonify({"error": "Falta el nombre del workshop"}), 400
+    province = (data.get("province") or "").strip()
+    city = (data.get("city") or "").strip()
+    phone = (data.get("phone") or "").strip()
+    cuit = (data.get("cuit") or "").strip()
+
+    if len(name) < 3:
+        return jsonify({"error": "El nombre debe tener al menos 3 caracteres"}), 400
+
+    VALID_PROVINCES = {
+        "Buenos Aires","CABA","Catamarca","Chaco","Chubut","Córdoba","Corrientes",
+        "Entre Ríos","Formosa","Jujuy","La Pampa","La Rioja","Mendoza","Misiones",
+        "Neuquén","Río Negro","Salta","San Juan","San Luis","Santa Cruz",
+        "Santa Fe","Santiago del Estero","Tierra del Fuego","Tucumán"
+    }
+
+    if province not in VALID_PROVINCES:
+        return jsonify({"error": "Provincia inválida"}), 400
+
+    if not city:
+        return jsonify({"error": "Falta la localidad"}), 400
+
+    # normalizaciones simples
+    import re
+    digits_only = re.compile(r"\D+")
+
+    phone_norm = phone.strip()
+    cuit_norm = digits_only.sub("", cuit) if cuit else None
+    if cuit_norm and len(cuit_norm) != 11:
+        return jsonify({"error": "CUIT inválido, deben ser 11 dígitos"}), 400
 
     OWNER_ROLE_ID = 2 
 
@@ -25,11 +52,11 @@ async def create_workshop():
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO workshop (name)
-                    VALUES ($1)
-                    RETURNING id, name
+                    INSERT INTO workshop (name, province, city, phone, cuit)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING id, name, province, city, phone, cuit
                     """,
-                    name,
+                    name, province, city, phone_norm, cuit_norm
                 )
 
                 await conn.execute(
@@ -42,8 +69,12 @@ async def create_workshop():
                     row["id"], user_id, OWNER_ROLE_ID
                 )
 
-        except UniqueViolationError:
-            return jsonify({"error": "Ya existe un workshop con ese nombre"}), 409
+        except UniqueViolationError as e:
+            # puede saltar por name o por cuit
+            msg = "Ya existe un workshop con ese nombre"
+            if "workshop_cuit_uidx" in str(e):
+                msg = "Ya existe un workshop con ese CUIT"
+            return jsonify({"error": msg}), 409
 
     return jsonify({
         "message": "Workshop creado",
