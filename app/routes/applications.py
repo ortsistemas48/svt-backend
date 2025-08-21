@@ -133,16 +133,16 @@ async def add_or_update_car(app_id):
 
             ok = await conn.fetchval(
                 """
-                SELECT CASE WHEN COUNT(*)>0 THEN true ELSE false END
+                SELECT CASE WHEN COUNT(*) > 0 THEN true ELSE false END
                 FROM stickers s
                 JOIN sticker_orders so ON so.id = s.sticker_order_id
                 LEFT JOIN cars c        ON c.sticker_id = s.id
                 WHERE s.id = $1
-                AND (c.id IS NULL OR c.license_plate = $2)
-                AND ($3::bigint IS NULL OR so.workshop_id = $3)
+                AND (c.id IS NULL OR c.license_plate = $2);
                 """,
-                sticker_id, license_plate, app_ws_id
+                sticker_id, license_plate
             )
+            print(sticker_id, license_plate, app_ws_id)
             if not ok:
                 return jsonify({"error": "Oblea inválida o ya asignada"}), 400
 
