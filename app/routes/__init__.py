@@ -11,4 +11,5 @@ def register_routes(app):
     app.register_blueprint(users_bp, url_prefix="/users")
     app.register_blueprint(workshops_bp, url_prefix="/workshops")
     app.register_blueprint(stickers_bp, url_prefix="/stickers")
+    app.register_blueprint(vehicles_bp, url_prefix="/vehicles")
 
