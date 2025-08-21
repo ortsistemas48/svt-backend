@@ -125,6 +125,28 @@ async def add_or_update_car(app_id):
     )
 
     async with get_conn_ctx() as conn:
+        sticker_id = data.get("sticker_id")
+
+        if sticker_id:
+            # si applications tiene workshop_id, validemos contra eso
+            app_ws_id = await conn.fetchval("SELECT workshop_id FROM applications WHERE id = $1", app_id)
+
+            ok = await conn.fetchval(
+                """
+                SELECT CASE WHEN COUNT(*)>0 THEN true ELSE false END
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c        ON c.sticker_id = s.id
+                WHERE s.id = $1
+                AND (c.id IS NULL OR c.license_plate = $2)
+                AND ($3::bigint IS NULL OR so.workshop_id = $3)
+                """,
+                sticker_id, license_plate, app_ws_id
+            )
+            if not ok:
+                return jsonify({"error": "Oblea inválida o ya asignada"}), 400
+
+
         async with conn.transaction():
             row = await conn.fetchrow("""
                 SELECT owner_id, driver_id
@@ -144,52 +166,54 @@ async def add_or_update_car(app_id):
 
             car_id = await conn.fetchval("""
                 INSERT INTO cars (
-                    license_plate, brand, model, fuel_type, weight,
-                    manufacture_year, engine_brand, engine_number,
-                    chassis_number, chassis_brand, green_card_number,
-                    green_card_expiration, license_number, license_expiration,
-                    vehicle_type, usage_type, owner_id, driver_id
+                license_plate, brand, model, fuel_type, weight,
+                manufacture_year, engine_brand, engine_number,
+                chassis_number, chassis_brand, green_card_number,
+                green_card_expiration, license_number, license_expiration,
+                vehicle_type, usage_type, owner_id, driver_id, insurance, sticker_id
                 )
                 VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8,
-                    $9, $10, $11,
-                    $12, $13, $14,
-                    $15, $16, $17, $18
+                $1, $2, $3, $4, $5,
+                $6, $7, $8,
+                $9, $10, $11,
+                $12, $13, $14,
+                $15, $16, $17, $18, $19, $20
                 )
                 ON CONFLICT (license_plate) DO UPDATE SET
-                    brand = COALESCE(EXCLUDED.brand, cars.brand),
-                    model = COALESCE(EXCLUDED.model, cars.model),
-                    fuel_type = COALESCE(EXCLUDED.fuel_type, cars.fuel_type),
-                    weight = COALESCE(EXCLUDED.weight, cars.weight),
-                    manufacture_year = COALESCE(EXCLUDED.manufacture_year, cars.manufacture_year),
-                    engine_brand = COALESCE(EXCLUDED.engine_brand, cars.engine_brand),
-                    engine_number = COALESCE(EXCLUDED.engine_number, cars.engine_number),
-                    chassis_number = COALESCE(EXCLUDED.chassis_number, cars.chassis_number),
-                    chassis_brand = COALESCE(EXCLUDED.chassis_brand, cars.chassis_brand),
-                    green_card_number = COALESCE(EXCLUDED.green_card_number, cars.green_card_number),
-                    green_card_expiration = COALESCE(EXCLUDED.green_card_expiration, cars.green_card_expiration),
-                    license_number = COALESCE(EXCLUDED.license_number, cars.license_number),
-                    license_expiration = COALESCE(EXCLUDED.license_expiration, cars.license_expiration),
-                    vehicle_type = COALESCE(EXCLUDED.vehicle_type, cars.vehicle_type),
-                    usage_type = COALESCE(EXCLUDED.usage_type, cars.usage_type),
-                    owner_id = COALESCE(EXCLUDED.owner_id, cars.owner_id),
-                    driver_id = COALESCE(EXCLUDED.driver_id, cars.driver_id)
+                brand = COALESCE(EXCLUDED.brand, cars.brand),
+                model = COALESCE(EXCLUDED.model, cars.model),
+                fuel_type = COALESCE(EXCLUDED.fuel_type, cars.fuel_type),
+                weight = COALESCE(EXCLUDED.weight, cars.weight),
+                manufacture_year = COALESCE(EXCLUDED.manufacture_year, cars.manufacture_year),
+                engine_brand = COALESCE(EXCLUDED.engine_brand, cars.engine_brand),
+                engine_number = COALESCE(EXCLUDED.engine_number, cars.engine_number),
+                chassis_number = COALESCE(EXCLUDED.chassis_number, cars.chassis_number),
+                chassis_brand = COALESCE(EXCLUDED.chassis_brand, cars.chassis_brand),
+                green_card_number = COALESCE(EXCLUDED.green_card_number, cars.green_card_number),
+                green_card_expiration = COALESCE(EXCLUDED.green_card_expiration, cars.green_card_expiration),
+                license_number = COALESCE(EXCLUDED.license_number, cars.license_number),
+                license_expiration = COALESCE(EXCLUDED.license_expiration, cars.license_expiration),
+                vehicle_type = COALESCE(EXCLUDED.vehicle_type, cars.vehicle_type),
+                usage_type = COALESCE(EXCLUDED.usage_type, cars.usage_type),
+                owner_id = COALESCE(EXCLUDED.owner_id, cars.owner_id),
+                driver_id = COALESCE(EXCLUDED.driver_id, cars.driver_id),
+                insurance = COALESCE(EXCLUDED.insurance, cars.insurance),
+                sticker_id = COALESCE(EXCLUDED.sticker_id, cars.sticker_id)
                 RETURNING id
             """,
             license_plate, data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
             data.get("manufacture_year"), data.get("engine_brand"), data.get("engine_number"),
             data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
             green_card_expiration, data.get("license_number"), license_expiration,
-            data.get("vehicle_type"), data.get("usage_type"),
-            owner_id, driver_id)
+            data.get("vehicle_type"), data.get("usage_type"), 
+            owner_id, driver_id, data.get("insurance"), sticker_id)
 
             await conn.execute("""
                 UPDATE applications
                 SET car_id = $1
                 WHERE id = $2
             """, car_id, app_id)
-
+            
     return jsonify({"message": "Vehículo vinculado a la aplicación", "car_id": car_id}), 200
 
 

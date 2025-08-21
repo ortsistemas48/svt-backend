@@ -1,5 +1,6 @@
 from quart import Blueprint, request, jsonify
 from app.db import get_conn_ctx
+from uuid import UUID
 
 users_bp = Blueprint("users", __name__, url_prefix="/users")
 
@@ -36,6 +37,190 @@ async def get_users_in_workshop(workshop_id: int):
         "workshop_id": workshop_id,
         "users": [dict(user) for user in users]
     })
+
+
+@users_bp.route("/get_users/all", methods=["GET"])
+async def get_all_users():
+    # Parámetros de paginación opcionales: ?limit=100&offset=0
+    try:
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        return jsonify({"error": "limit y offset deben ser números"}), 400
+
+    # límites razonables
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                u.id,
+                u.first_name,
+                u.last_name,
+                u.email,
+                u.dni,
+                u.phone_number,
+                COALESCE(
+                  json_agg(
+                    DISTINCT jsonb_build_object(
+                      'workshop_id', wu.workshop_id,
+                      'role', ut.name
+                    )
+                  ) FILTER (WHERE wu.user_id IS NOT NULL),
+                  '[]'
+                ) AS memberships
+            FROM users u
+            LEFT JOIN workshop_users wu ON wu.user_id = u.id
+            LEFT JOIN user_types ut ON ut.id = wu.user_type_id
+            GROUP BY u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number
+            ORDER BY u.id
+            LIMIT $1 OFFSET $2;
+            """,
+            limit,
+            offset,
+        )
+
+        # total para ayudar a paginar en el frontend
+        total_row = await conn.fetchrow("SELECT COUNT(*) AS total FROM users;")
+        total = total_row["total"] if total_row else 0
+
+    return jsonify({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "users": [
+            {
+                "id": r["id"],
+                "first_name": r["first_name"],
+                "last_name": r["last_name"],
+                "email": r["email"],
+                "dni": r["dni"],
+                "phone_number": r["phone_number"],
+                "memberships": r["memberships"],  # lista de {workshop_id, role}
+            }
+            for r in rows
+        ],
+    })
+    
+    
+@users_bp.route("/get_users/pending", methods=["GET"])
+async def get_pending_users():
+    # ?limit=100&offset=0
+    try:
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        return jsonify({"error": "limit y offset deben ser números"}), 400
+
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                u.id,
+                u.first_name,
+                u.last_name,
+                u.email,
+                u.dni,
+                u.created_at,
+                COALESCE(
+                  json_agg(
+                    DISTINCT jsonb_build_object(
+                      'workshop_id', wu.workshop_id,
+                      'role', ut.name
+                    )
+                  ) FILTER (WHERE wu.user_id IS NOT NULL),
+                  '[]'
+                ) AS memberships
+            FROM users u
+            LEFT JOIN workshop_users wu ON wu.user_id = u.id
+            LEFT JOIN user_types ut ON ut.id = wu.user_type_id
+            WHERE u.is_approved = false
+            GROUP BY u.id, u.first_name, u.last_name, u.email, u.dni, u.created_at
+            ORDER BY u.id
+            LIMIT $1 OFFSET $2;
+            """,
+            limit,
+            offset,
+        )
+
+        total_row = await conn.fetchrow(
+            "SELECT COUNT(*) AS total FROM users WHERE is_approved = false;"
+        )
+        total = total_row["total"] if total_row else 0
+
+    return jsonify({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "users": [
+            {
+                "id": r["id"],
+                "first_name": r["first_name"],
+                "last_name": r["last_name"],
+                "email": r["email"],
+                "dni": r["dni"],
+                "created_at": r["created_at"],
+                "memberships": r["memberships"],
+            }
+            for r in rows
+        ],
+    })
+    
+    
+def _as_uuid(s: str) -> UUID:
+    return UUID(s)  # lanza ValueError si no es UUID
+
+
+@users_bp.route("/approve/<user_id>", methods=["POST", "OPTIONS"])
+async def approve_user(user_id: str):
+    # Preflight CORS
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    # Validar que tenga formato UUID
+    try:
+        _as_uuid(user_id)
+    except ValueError:
+        return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
+
+    async with get_conn_ctx() as conn:
+        result = await conn.execute("""
+            UPDATE users
+            SET is_approved = true
+            WHERE id = $1::uuid
+        """, user_id)
+
+    if result.endswith("0"):
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    return jsonify({"ok": True, "user_id": user_id, "approved": True})
+
+
+@users_bp.route("/reject/<user_id>", methods=["POST", "OPTIONS"])
+async def reject_user(user_id: str):
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        _as_uuid(user_id)
+    except ValueError:
+        return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
+
+    async with get_conn_ctx() as conn:
+        result = await conn.execute("""
+            DELETE FROM users
+            WHERE id = $1::uuid AND is_approved = false
+        """, user_id)
+
+    if result.endswith("0"):
+        return jsonify({"error": "Usuario no encontrado o ya aprobado"}), 404
+
+    return jsonify({"ok": True, "user_id": user_id, "rejected": True})
 
 
 @users_bp.route("/<int:user_id>/workshops", methods=["GET"])
