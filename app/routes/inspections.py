@@ -64,7 +64,7 @@ async def create_inspection():
 
         await conn.execute(
             "UPDATE applications SET status = $1 WHERE id = $2",
-            "En Curso",
+            "En curso",
             int(app_id),
         )
 
