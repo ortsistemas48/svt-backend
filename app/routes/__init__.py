@@ -4,6 +4,7 @@ from .users import users_bp
 from .workshops import workshops_bp
 from .vehicles import vehicles_bp
 from .stickers import stickers_bp
+from .inspections import inspections_bp
 
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/auth")
@@ -12,4 +13,4 @@ def register_routes(app):
     app.register_blueprint(workshops_bp, url_prefix="/workshops")
     app.register_blueprint(stickers_bp, url_prefix="/stickers")
     app.register_blueprint(vehicles_bp, url_prefix="/vehicles")
-
+    app.register_blueprint(inspections_bp, url_prefix="/inspections")
