@@ -1,11 +1,10 @@
 import asyncpg
-import os 
+import os
 from contextlib import asynccontextmanager
 
-db_pool = None
+db_pool: asyncpg.Pool | None = None
 
-
-async def init_db():
+async def init_db() -> None:
     print("Intentando conexión con:")
     print("USER:", os.getenv("DB_USER"))
     print("PASSWORD:", os.getenv("DB_PASSWORD"))
@@ -20,20 +19,54 @@ async def init_db():
         database=os.getenv("DB_NAME"),
         host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT", 5432)),
+        # Importante para PgBouncer en modo transaction
+        statement_cache_size=0,                # evita server side prepares
+        max_inactive_connection_lifetime=30.0, # cierra conexiones ociosas
+        command_timeout=60.0,                  # timeout razonable
+        min_size=1,
+        max_size=int(os.getenv("DB_POOL_MAX_SIZE", 10)),
     )
-    
-    
-async def get_conn():
+
+def _assert_pool():
     if db_pool is None:
-        raise Exception("DB pool no inicializado. ¿Llamaste a init_db()?")
+        raise RuntimeError("DB pool no inicializado, llamá a init_db() primero")
+    return db_pool
 
-    return await db_pool.acquire()
-
+# Evitá exponer una conexión suelta, en transaction pooling no hay estado de sesión
+# Usá siempre context managers que abren y cierran transacciones cortas
 
 @asynccontextmanager
 async def get_conn_ctx():
-    conn = await db_pool.acquire()
-    try:
-        yield conn
-    finally:
-        await db_pool.release(conn)
+    """
+    Adquiere una conexión del pool y abre una transacción.
+    Libera la conexión al terminar, ideal para uno o varios statements atómicos.
+    """
+    pool = _assert_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            yield conn
+
+# Helpers convenientes para consultas simples
+# Cada llamada adquiere y libera conexión, útil para operaciones de una sola query
+
+async def fetch(query: str, *args):
+    pool = _assert_pool()
+    return await pool.fetch(query, *args)
+
+async def fetchrow(query: str, *args):
+    pool = _assert_pool()
+    return await pool.fetchrow(query, *args)
+
+async def fetchval(query: str, *args):
+    pool = _assert_pool()
+    return await pool.fetchval(query, *args)
+
+async def execute(query: str, *args):
+    pool = _assert_pool()
+    return await pool.execute(query, *args)
+
+async def close_db() -> None:
+    global db_pool
+    if db_pool is not None:
+        await db_pool.close()
+        db_pool = None

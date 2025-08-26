@@ -1,6 +1,6 @@
 from quart import Blueprint, request, jsonify, current_app, g, redirect
 from passlib.hash import bcrypt
-from app.db import get_conn, get_conn_ctx
+from app.db import get_conn_ctx
 import jwt
 import datetime
 from quart.wrappers.response import Response
@@ -44,34 +44,34 @@ async def register():
     if password != confirm_password:
         return jsonify({"error": "Las contraseñas no coinciden"}), 400
 
-    conn = await get_conn()
-    existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
-    if existing_user:
-        return jsonify({"error": "El email ya está en uso"}), 400
+    async with get_conn_ctx() as conn:
+        existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
+        if existing_user:
+            return jsonify({"error": "El email ya está en uso"}), 400
 
-    hashed_password = bcrypt.hash(password)
+        hashed_password = bcrypt.hash(password)
 
-    async with conn.transaction():
-        user_row = await conn.fetchrow(
-            """
-            INSERT INTO users (
-                email, first_name, last_name, phone_number, dni, password,
-                created_at, is_active, is_approved
+        async with conn.transaction():
+            user_row = await conn.fetchrow(
+                """
+                INSERT INTO users (
+                    email, first_name, last_name, phone_number, dni, password,
+                    created_at, is_active, is_approved
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, true, true)
+                RETURNING id
+                """,
+                email, first_name, last_name, phone_number, dni, hashed_password
             )
-            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, true, true)
-            RETURNING id
-            """,
-            email, first_name, last_name, phone_number, dni, hashed_password
-        )
-        user_id = user_row["id"]
+            user_id = user_row["id"]
 
-        await conn.execute(
-            """
-            INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-            """,
-            workshop_id, user_id, user_type_id
-        )
+            await conn.execute(
+                """
+                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
+                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                """,
+                workshop_id, user_id, user_type_id
+            )
 
     return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
 
@@ -96,40 +96,40 @@ async def register_user():
     if password != confirm_password:
         return jsonify({"error": "Las contraseñas no coinciden"}), 400
 
-    conn = await get_conn()
+    async with get_conn_ctx() as conn:
 
-    existing_user = await conn.fetchrow(
-        "SELECT 1 FROM users WHERE email = $1",
-        email
-    )
-    if existing_user:
-        return jsonify({"error": "El email ya está en uso"}), 400
-
-    hashed_password = bcrypt.hash(password)
-    token = generate_email_token()
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-
-    async with conn.transaction():
-        user_row = await conn.fetchrow(
-            """
-            INSERT INTO users (
-                email, first_name, last_name, phone_number, dni,
-                password, created_at, is_active, is_approved
-            ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, false, false)
-            RETURNING id, email
-            """,
-            email, first_name, last_name, phone_number, dni, hashed_password
+        existing_user = await conn.fetchrow(
+            "SELECT 1 FROM users WHERE email = $1",
+            email
         )
+        if existing_user:
+            return jsonify({"error": "El email ya está en uso"}), 400
 
-        user_id = user_row["id"]
+        hashed_password = bcrypt.hash(password)
+        token = generate_email_token()
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
 
-        await conn.execute(
-            """
-            INSERT INTO email_verification_tokens (user_id, token, expires_at)
-            VALUES ($1, $2, $3)
-            """,
-            user_id, token, expires_at
-        )
+        async with conn.transaction():
+            user_row = await conn.fetchrow(
+                """
+                INSERT INTO users (
+                    email, first_name, last_name, phone_number, dni,
+                    password, created_at, is_active, is_approved
+                ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, false, false)
+                RETURNING id, email
+                """,
+                email, first_name, last_name, phone_number, dni, hashed_password
+            )
+
+            user_id = user_row["id"]
+
+            await conn.execute(
+                """
+                INSERT INTO email_verification_tokens (user_id, token, expires_at)
+                VALUES ($1, $2, $3)
+                """,
+                user_id, token, expires_at
+            )
 
     # Envío del email de verificación
     try:
@@ -267,10 +267,10 @@ async def login():
     if not identifier or not password:
         return jsonify({"error": "Email o DNI y contraseña requeridos"}), 400
 
-    conn = await get_conn()
-    user = await conn.fetchrow(
-        "SELECT * FROM users WHERE email = $1 OR dni = $1", identifier
-    )
+    async with get_conn_ctx() as conn:
+        user = await conn.fetchrow(
+            "SELECT * FROM users WHERE email = $1 OR dni = $1", identifier
+        )
 
     if not user or not bcrypt.verify(password, user["password"]):
         return jsonify({"error": "Credenciales inválidas"}), 401
