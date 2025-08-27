@@ -34,18 +34,19 @@ def _assert_pool():
 
 # Evitá exponer una conexión suelta, en transaction pooling no hay estado de sesión
 # Usá siempre context managers que abren y cierran transacciones cortas
-
 @asynccontextmanager
 async def get_conn_ctx():
     """
-    Adquiere una conexión del pool y abre una transacción.
-    Libera la conexión al terminar, ideal para uno o varios statements atómicos.
+    Adquiere una conexión del pool.
+    El manejo de transacciones queda a cargo del llamador.
     """
     pool = _assert_pool()
     async with pool.acquire() as conn:
-        async with conn.transaction():
+        try:
             yield conn
-
+        finally:
+            pass
+        
 # Helpers convenientes para consultas simples
 # Cada llamada adquiere y libera conexión, útil para operaciones de una sola query
 
