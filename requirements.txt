@@ -9,3 +9,6 @@ supabase
 pytest
 pytest-asyncio
 httpx
+pymupdf
+qrcode
+requests
