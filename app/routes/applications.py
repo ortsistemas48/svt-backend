@@ -293,18 +293,65 @@ async def get_application_full(id):
             owner = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", application["owner_id"])
         if application["driver_id"]:
             driver = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", application["driver_id"])
-        if application["car_id"]:
-            car = await conn.fetchrow("SELECT * FROM cars WHERE id = $1", application["car_id"])
 
+        if application["car_id"]:
+            # 🎯 Solo cambiamos cómo traemos el auto para incluir la oblea completa
+            row = await conn.fetchrow("""
+                SELECT
+                  c.*,
+                  s.id                AS sticker__id,
+                  s.sticker_number    AS sticker__sticker_number,
+                  s.expiration_date   AS sticker__expiration_date,
+                  s.issued_at         AS sticker__issued_at,
+                  s.status            AS sticker__status,
+                  s.sticker_order_id  AS sticker__sticker_order_id
+                FROM cars c
+                LEFT JOIN stickers s ON s.id = c.sticker_id
+                WHERE c.id = $1
+            """, application["car_id"])
+
+            if row:
+                # Convertimos y separamos campos del sticker
+                car_dict = dict(row)
+
+                sticker = None
+                if car_dict.get("sticker__id") is not None:
+                    sticker = {
+                        "id": car_dict.pop("sticker__id"),
+                        "sticker_number": car_dict.pop("sticker__sticker_number", None),
+                        "expiration_date": car_dict.pop("sticker__expiration_date", None),
+                        "issued_at": car_dict.pop("sticker__issued_at", None),
+                        "status": car_dict.pop("sticker__status", None),
+                        "sticker_order_id": car_dict.pop("sticker__sticker_order_id", None),
+                    }
+                    # Serializar fechas del sticker
+                    for k in ("expiration_date", "issued_at"):
+                        if sticker.get(k) is not None and hasattr(sticker[k], "isoformat"):
+                            sticker[k] = sticker[k].isoformat()
+                else:
+                    # limpiar claves aliased si no hay sticker
+                    for k in list(car_dict.keys()):
+                        if k.startswith("sticker__"):
+                            car_dict.pop(k, None)
+
+                # Serializar fechas del auto
+                for k in ("green_card_expiration", "license_expiration"):
+                    if car_dict.get(k) is not None and hasattr(car_dict[k], "isoformat"):
+                        car_dict[k] = car_dict[k].isoformat()
+
+                if sticker:
+                    car_dict["sticker"] = sticker
+
+                car = car_dict
 
     return jsonify({
         "application_id": application["id"],
         "owner": dict(owner) if owner else None,
         "driver": dict(driver) if driver else None,
-        "car": dict(car) if car else None
+        "car": car if car else None
     }), 200
 
-from quart import request, jsonify, g
+
 
 @applications_bp.route("/workshop/<int:workshop_id>/full", methods=["GET"])
 async def list_full_applications_by_workshop(workshop_id: int):
