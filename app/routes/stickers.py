@@ -58,6 +58,39 @@ async def list_available_stickers():
 
     return jsonify(out), 200
 
+
+@stickers_bp.route("/available-orders", methods=["GET"])
+async def list_available_orders():
+    workshop_id = request.args.get("workshop_id", type=int)
+    if not workshop_id:
+        return jsonify({"error": "workshop_id requerido"}), 400
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+              so.id,
+              so.name,
+              COUNT(s.id) AS available_count
+            FROM stickers s
+            JOIN sticker_orders so ON so.id = s.sticker_order_id
+            LEFT JOIN cars c        ON c.sticker_id = s.id
+            WHERE
+              so.workshop_id = $1
+              AND lower(s.status) = 'disponible'
+              AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
+              AND c.id IS NULL
+            GROUP BY so.id, so.name
+            ORDER BY so.id DESC
+            """,
+            workshop_id,
+        )
+
+    out = [dict(r) for r in rows]
+    print(out)
+    return jsonify(out), 200
+
+
 @stickers_bp.route("/<int:sticker_id>", methods=["GET"])
 async def get_sticker(sticker_id: int):
     async with get_conn_ctx() as conn:
@@ -176,29 +209,30 @@ async def unassign_sticker_from_car():
 @stickers_bp.route("/reassign-sticker", methods=["POST"])
 async def reassign_sticker():
     """
-    Reasigna la oblea (sticker_id) a un auto identificado por su patente.
-    Body JSON:
-      - license_plate: string (requerido)  → patente del vehículo a modificar
-      - sticker_id: int (requerido)        → nueva oblea a asignar
+    Reasigna la oblea a un auto identificado por su patente tomando la primera
+    oblea disponible de una orden dada.
 
-    Comportamiento:
+    Body JSON:
+      - license_plate: string requerido
+      - sticker_order_id: int requerido
+
+    Reglas:
       - Si el auto no existe → 404
-      - Si la nueva oblea ya está asignada a otro auto → 400
-      - Asigna la nueva oblea al auto.
-      - Si el auto tenía una oblea anterior y es distinta, se la marca con
-        status = 'No Disponible'.
+      - Si no hay oblea disponible en esa orden → 400
+      - Asigna la oblea al auto
+      - Si el auto tenía otra oblea distinta → la marca como 'No Disponible'
     """
     data = await request.get_json()
     license_plate_raw = data.get("license_plate")
-    new_sticker_id = data.get("sticker_id")
+    sticker_order_id = data.get("sticker_order_id")
 
     license_plate = _norm_plate(license_plate_raw)
-    if not license_plate or not isinstance(new_sticker_id, int):
-        return jsonify({"error": "license_plate y sticker_id son requeridos"}), 400
+    if not license_plate or not isinstance(sticker_order_id, int):
+        return jsonify({"error": "license_plate y sticker_order_id son requeridos"}), 400
 
     async with get_conn_ctx() as conn:
         async with conn.transaction():
-            # 1) Traer el auto por patente (normalizada)
+            # 1) Buscar auto
             car_row = await conn.fetchrow(
                 """
                 SELECT id, sticker_id
@@ -213,36 +247,53 @@ async def reassign_sticker():
             car_id = car_row["id"]
             old_sticker_id = car_row["sticker_id"]
 
-            # 2) Validar que la nueva oblea exista
-            exists_new = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM stickers WHERE id = $1)",
-                new_sticker_id,
-            )
-            if not exists_new:
-                return jsonify({"error": "Oblea (sticker_id) inexistente"}), 400
-
-            # 3) Chequear que la nueva oblea no esté asignada a otro auto
-            assigned_to_other = await conn.fetchval(
+            # 2) Tomar una oblea disponible de esa orden
+            # Criterios:
+            # - status 'disponible' (case insensitive)
+            # - no expirada
+            # - no asignada a ningún auto
+            # - orden coincide
+            # - FOR UPDATE SKIP LOCKED para concurrencia
+            available_row = await conn.fetchrow(
                 """
-                SELECT EXISTS(
-                  SELECT 1
-                  FROM cars
-                  WHERE sticker_id = $1
-                    AND id <> $2
+                WITH candidate AS (
+                  SELECT s.id
+                  FROM stickers s
+                  WHERE s.sticker_order_id = $1
+                    AND lower(s.status) = 'disponible'
+                    AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM cars c WHERE c.sticker_id = s.id
+                    )
+                  ORDER BY s.id ASC
+                  LIMIT 1
                 )
+                SELECT s.id
+                FROM stickers s
+                JOIN candidate c ON c.id = s.id
+                FOR UPDATE SKIP LOCKED
                 """,
-                new_sticker_id, car_id,
+                sticker_order_id,
             )
-            if assigned_to_other:
-                return jsonify({"error": "La oblea ya está asignada a otro vehículo"}), 400
 
-            # 4) Actualizar el auto con la nueva oblea
+            if not available_row:
+                return jsonify({"error": "No hay obleas disponibles en esa orden"}), 400
+
+            new_sticker_id = available_row["id"]
+
+            # 3) Asignar al auto
             await conn.execute(
                 "UPDATE cars SET sticker_id = $1 WHERE id = $2",
                 new_sticker_id, car_id,
             )
 
-            # 5) Si había una oblea anterior distinta → marcarla como "No Disponible"
+            # 4) Marcar la nueva como No Disponible para que no vuelva al pool
+            await conn.execute(
+                "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
+                new_sticker_id,
+            )
+
+            # 5) Si había una oblea anterior distinta → marcarla No Disponible
             if old_sticker_id and old_sticker_id != new_sticker_id:
                 await conn.execute(
                     "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
@@ -253,7 +304,7 @@ async def reassign_sticker():
         "ok": True,
         "car_id": car_id,
         "old_sticker_id": old_sticker_id,
-        "new_sticker_id": new_sticker_id
+        "new_sticker_id": new_sticker_id,
     }), 200
 
 @stickers_bp.route("/<int:sticker_id>/mark-used", methods=["POST"])
