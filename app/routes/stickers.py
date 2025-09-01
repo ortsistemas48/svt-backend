@@ -316,3 +316,38 @@ async def mark_sticker_as_used(sticker_id: int):
         )
         
     return jsonify({"ok": True, "sticker_id": sticker_id, "status": "En Uso"}), 200
+
+
+@stickers_bp.route("/next-available", methods=["GET"])
+async def get_next_available_sticker():
+    """
+    Devuelve la próxima oblea disponible (la que tomaría el sistema)
+    para una orden dada, sin asignarla.
+    Parámetros:
+      - sticker_order_id: int requerido
+    Respuesta:
+      - { id, sticker_number } o 404 si no hay
+    """
+    sticker_order_id = request.args.get("sticker_order_id", type=int)
+    if not isinstance(sticker_order_id, int):
+        return jsonify({"error": "sticker_order_id requerido"}), 400
+
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.id, s.sticker_number
+            FROM stickers s
+            WHERE s.sticker_order_id = $1
+              AND lower(s.status) = 'disponible'
+              AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
+              AND NOT EXISTS (SELECT 1 FROM cars c WHERE c.sticker_id = s.id)
+            ORDER BY s.id ASC
+            LIMIT 1
+            """,
+            sticker_order_id
+        )
+
+    if not row:
+        return jsonify({"error": "No hay obleas disponibles en esa orden"}), 404
+
+    return jsonify({"id": row["id"], "sticker_number": row["sticker_number"]}), 200
