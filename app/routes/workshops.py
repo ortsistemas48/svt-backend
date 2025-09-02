@@ -153,6 +153,49 @@ async def create_workshop():
         }
     }), 201
 
+# ====== Verificar membresía del usuario en un taller ======
+@workshops_bp.route("/<int:workshop_id>/membership", methods=["GET"])
+async def check_workshop_membership(workshop_id: int):
+    """
+    Devuelve si el usuario autenticado (g.user_id) pertenece al taller indicado.
+    - 401 si no hay usuario autenticado.
+    - 404 si el taller no existe.
+    - 200 con is_member=True/False si el taller existe.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        # 1) verificar que el taller exista
+        exists = await conn.fetchval("SELECT 1 FROM workshop WHERE id = $1", workshop_id)
+        print(f"exists={exists}")
+        if not exists:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        # 2) verificar membresía (y devolver rol si existe)
+        row = await conn.fetchrow(
+            """
+            SELECT user_type_id
+            FROM workshop_users
+            WHERE workshop_id = $1 AND user_id = $2
+            """,
+            workshop_id, user_id
+        )
+
+    if not row:
+        return jsonify({
+            "workshop_id": workshop_id,
+            "user_id": str(user_id),
+            "is_member": False
+        }), 200
+
+    return jsonify({
+        "workshop_id": workshop_id,
+        "user_id": str(user_id),
+        "is_member": True,
+        "user_type_id": row["user_type_id"]  # p.ej. 2 = OWNER
+    }), 200
 
 # Cambiar el nombre de un workshop
 @workshops_bp.route("/<int:workshop_id>/name", methods=["PUT", "PATCH"])
