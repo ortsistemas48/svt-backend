@@ -323,6 +323,8 @@ async def bulk_upsert_inspection_details(inspection_id: int):
                 )
 
     return jsonify({"message": "Detalles guardados", "items": out}), 200
+
+
 @inspections_bp.route("/inspections/<int:inspection_id>/details", methods=["GET"])
 async def list_inspection_details(inspection_id: int):
     user_id = g.get("user_id")
@@ -334,7 +336,20 @@ async def list_inspection_details(inspection_id: int):
         if not ws_id:
             return jsonify({"error": "Inspección no encontrada"}), 404
 
-        # traigo la observación global de la inspección
+        # dominio del auto
+        car_row = await conn.fetchrow(
+            """
+            SELECT c.license_plate
+            FROM inspections i
+            JOIN applications a ON a.id = i.application_id
+            JOIN cars c        ON c.id = a.car_id
+            WHERE i.id = $1
+            """,
+            inspection_id,
+        )
+        license_plate = car_row["license_plate"] if car_row else None
+
+        # observación global
         global_row = await conn.fetchrow(
             "SELECT global_observations FROM inspections WHERE id = $1",
             inspection_id,
@@ -382,6 +397,7 @@ async def list_inspection_details(inspection_id: int):
         )
 
     return jsonify({
+        "license_plate": license_plate,  # dominio del auto
         "global_observations": global_obs,
         "items": [
             {
@@ -398,7 +414,7 @@ async def list_inspection_details(inspection_id: int):
                     if r["detail_id"] is not None
                     else None
                 ),
-                "observations": r["obs_list"],  # lista de observaciones por paso con checked
+                "observations": r["obs_list"],
             }
             for r in rows
         ],
