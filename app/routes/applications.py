@@ -281,37 +281,38 @@ async def get_application_full(id):
         """, id, user_id)
 
         if not application:
-            await conn.close()
             return jsonify({"error": "Trámite no encontrado"}), 404
 
-        # Traer owner, driver y car si existen
         owner = None
         driver = None
         car = None
 
         if application["owner_id"]:
-            owner = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", application["owner_id"])
+            owner = await conn.fetchrow(
+                "SELECT * FROM persons WHERE id = $1", application["owner_id"]
+            )
+
         if application["driver_id"]:
-            driver = await conn.fetchrow("SELECT * FROM persons WHERE id = $1", application["driver_id"])
+            driver = await conn.fetchrow(
+                "SELECT * FROM persons WHERE id = $1", application["driver_id"]
+            )
 
         if application["car_id"]:
-            # 🎯 Solo cambiamos cómo traemos el auto para incluir la oblea completa
             row = await conn.fetchrow("""
                 SELECT
                   c.*,
-                  s.id                AS sticker__id,
-                  s.sticker_number    AS sticker__sticker_number,
-                  s.expiration_date   AS sticker__expiration_date,
-                  s.issued_at         AS sticker__issued_at,
-                  s.status            AS sticker__status,
-                  s.sticker_order_id  AS sticker__sticker_order_id
+                  s.id               AS sticker__id,
+                  s.sticker_number   AS sticker__sticker_number,
+                  s.expiration_date  AS sticker__expiration_date,
+                  s.issued_at        AS sticker__issued_at,
+                  s.status           AS sticker__status,
+                  s.sticker_order_id AS sticker__sticker_order_id
                 FROM cars c
                 LEFT JOIN stickers s ON s.id = c.sticker_id
                 WHERE c.id = $1
             """, application["car_id"])
 
             if row:
-                # Convertimos y separamos campos del sticker
                 car_dict = dict(row)
 
                 sticker = None
@@ -324,17 +325,14 @@ async def get_application_full(id):
                         "status": car_dict.pop("sticker__status", None),
                         "sticker_order_id": car_dict.pop("sticker__sticker_order_id", None),
                     }
-                    # Serializar fechas del sticker
                     for k in ("expiration_date", "issued_at"):
                         if sticker.get(k) is not None and hasattr(sticker[k], "isoformat"):
                             sticker[k] = sticker[k].isoformat()
                 else:
-                    # limpiar claves aliased si no hay sticker
                     for k in list(car_dict.keys()):
                         if k.startswith("sticker__"):
                             car_dict.pop(k, None)
 
-                # Serializar fechas del auto
                 for k in ("green_card_expiration", "license_expiration"):
                     if car_dict.get(k) is not None and hasattr(car_dict[k], "isoformat"):
                         car_dict[k] = car_dict[k].isoformat()
@@ -344,13 +342,39 @@ async def get_application_full(id):
 
                 car = car_dict
 
+        # Documentos vinculados a la aplicación
+        docs_rows = await conn.fetch("""
+            SELECT id, file_name, file_url, size_bytes, mime_type, role, created_at
+            FROM application_documents
+            WHERE application_id = $1
+            ORDER BY created_at DESC
+        """, id)
+
+        documents = []
+        documents_by_role = {"owner": [], "driver": [], "car": [], "generic": []}
+
+        for r in docs_rows:
+            item = {
+                "id": r["id"],
+                "file_name": r["file_name"],
+                "file_url": r["file_url"],
+                "size_bytes": r["size_bytes"],
+                "mime_type": r["mime_type"],
+                "role": r["role"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            documents.append(item)
+            role_key = item["role"] if item["role"] in documents_by_role else "generic"
+            documents_by_role[role_key].append(item)
+
     return jsonify({
         "application_id": application["id"],
         "owner": dict(owner) if owner else None,
         "driver": dict(driver) if driver else None,
-        "car": car if car else None
+        "car": car if car else None,
+        "documents": documents,
+        "documents_by_role": documents_by_role,
     }), 200
-
 
 
 @applications_bp.route("/workshop/<int:workshop_id>/full", methods=["GET"])
