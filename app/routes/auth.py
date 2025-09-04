@@ -15,34 +15,43 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 # Registro
 @auth_bp.route("/register", methods=["POST"])
 async def register():
-    """Los campos requeridos para registrar son estos:
-    {
-    "email": "ejemplo@mail.com",
-    "password": "123456",
-    "confirm_password": "123456",
-    "first_name": "Juan",
-    "last_name": "Pérez",
-    "dni": 12345678,
-    "phone_number": "1234567890",
-    "workshop_id": 1,
-    "user_type_id": 2
-    }"""
+    """
+    Requeridos:
+      email, password, confirm_password, first_name, last_name, workshop_id, user_type_id
+    Opcionales:
+      dni, phone_number
+    Si el rol es Ingeniero (id=3), opcionales adicionales:
+      licence_number, title_name
+    """
     data = await request.get_json()
-    email = data.get("email")
-    password = data.get("password")
+
+    email            = data.get("email")
+    password         = data.get("password")
     confirm_password = data.get("confirm_password")
-    first_name = data.get("first_name")
-    last_name = data.get("last_name")
-    dni = data.get("dni")
-    phone_number = data.get("phone_number")
-    workshop_id = data.get("workshop_id")
-    user_type_id = data.get("user_type_id")
+    first_name       = data.get("first_name")
+    last_name        = data.get("last_name")
+    dni              = data.get("dni")
+    phone_number     = data.get("phone_number")
+    workshop_id      = data.get("workshop_id")
+    user_type_id     = data.get("user_type_id")
+
+    # Nuevos campos (opcionales). Acepta alias antiguos por compatibilidad.
+    licence_number = data.get("licence_number") or data.get("nro_matricula")
+    title_name     = data.get("title_name")     or data.get("titulo_universitario")
+
+    ENGINEER_ROLE_ID = 3
 
     if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
         return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
 
     if password != confirm_password:
         return jsonify({"error": "Las contraseñas no coinciden"}), 400
+
+    is_engineer = int(user_type_id) == ENGINEER_ROLE_ID
+    if not is_engineer:
+        # Si no es ingeniero, no guardamos estos valores
+        licence_number = None
+        title_name = None
 
     async with get_conn_ctx() as conn:
         existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
@@ -56,12 +65,16 @@ async def register():
                 """
                 INSERT INTO users (
                     email, first_name, last_name, phone_number, dni, password,
+                    licence_number, title_name,
                     created_at, is_active, is_approved
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, true, true)
+                VALUES ($1, $2, $3, $4, $5, $6,
+                        $7, $8,
+                        CURRENT_TIMESTAMP, true, true)
                 RETURNING id
                 """,
-                email, first_name, last_name, phone_number, dni, hashed_password
+                email, first_name, last_name, phone_number, dni, hashed_password,
+                licence_number, title_name
             )
             user_id = user_row["id"]
 
@@ -74,6 +87,7 @@ async def register():
             )
 
     return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
+
 
 
 

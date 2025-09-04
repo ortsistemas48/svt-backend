@@ -8,18 +8,40 @@ users_bp = Blueprint("users", __name__, url_prefix="/users")
 @users_bp.route("/by-email", methods=["GET"])
 async def get_user_by_email():
     email = request.args.get("email")
+    workshop_id = request.args.get("workshop_id", type=int)
+
     if not email:
         return jsonify({"error": "email requerido"}), 400
+    if workshop_id is None:
+        return jsonify({"error": "workshop_id requerido"}), 400
 
     async with get_conn_ctx() as conn:
-        row = await conn.fetchrow("""
-            SELECT id, first_name, last_name, email, dni, phone_number
-            FROM users
-            WHERE LOWER(email) = LOWER($1)
+        row = await conn.fetchrow(
+            """
+            SELECT
+                u.id,
+                u.first_name,
+                u.last_name,
+                u.email,
+                u.dni,
+                u.phone_number,
+                u.title_name,
+                u.licence_number,
+                wu.user_type_id
+            FROM users u
+            LEFT JOIN workshop_users wu
+              ON wu.user_id = u.id
+             AND wu.workshop_id = $2
+            WHERE LOWER(u.email) = LOWER($1)
             LIMIT 1
-        """, email)
+            """,
+            email, workshop_id
+        )
 
+    # Si el usuario existe pero no está asociado a ese workshop,
+    # user_type_id vendrá como null.
     return jsonify(dict(row) if row else None)
+
 
 
 @users_bp.route("/get_users/workshop/<int:workshop_id>", methods=["GET"])
