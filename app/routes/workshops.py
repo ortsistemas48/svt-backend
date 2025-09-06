@@ -4,6 +4,202 @@ from asyncpg.exceptions import UniqueViolationError
 
 workshops_bp = Blueprint("workshops", __name__, url_prefix="/workshops")
 
+OWNER_ROLE_ID = 2
+VALID_PROVINCES = {
+    "Buenos Aires","CABA","Catamarca","Chaco","Chubut","Córdoba","Corrientes",
+    "Entre Ríos","Formosa","Jujuy","La Pampa","La Rioja","Mendoza","Misiones",
+    "Neuquén","Río Negro","Salta","San Juan","San Luis","Santa Cruz",
+    "Santa Fe","Santiago del Estero","Tierra del Fuego","Tucumán"
+}
+
+def _clean_int_or_none(v, field_name: str):
+    if v in (None, ""):
+        return None
+    try:
+        n = int(v)
+        if n <= 0:
+            raise ValueError
+        return n
+    except Exception:
+        raise ValueError(f"El {field_name} debe ser numérico y mayor a cero")
+    
+    
+@workshops_bp.route("/create-unapproved", methods=["POST"])
+async def create_workshop_unapproved():
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    razon_social = (data.get("razonSocial") or "").strip()
+    province = (data.get("province") or "").strip()
+    city = (data.get("city") or "").strip()
+    address = (data.get("address") or "").strip() 
+    phone = (data.get("phone") or "").strip()
+    cuit = (data.get("cuit") or "").strip()
+    plant_number_raw = data.get("plantNumber")
+
+    if len(name) < 3:
+        return jsonify({"error": "El nombre debe tener al menos 3 caracteres"}), 400
+    if len(razon_social) < 3:
+        return jsonify({"error": "Ingresá una razón social válida"}), 400
+    if province not in VALID_PROVINCES:
+        return jsonify({"error": "Provincia inválida"}), 400
+    if not city:
+        return jsonify({"error": "Falta la localidad"}), 400
+
+    import re
+    digits_only = re.compile(r"\D+")
+    cuit_norm = digits_only.sub("", cuit) if cuit else None
+    if cuit_norm and len(cuit_norm) != 11:
+        return jsonify({"error": "CUIT inválido, deben ser 11 dígitos"}), 400
+
+    try:
+        plant_number = _clean_int_or_none(plant_number_raw, "número de planta")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.transaction():
+                # detectar si la tabla workshop tiene columna address
+                cols = await conn.fetch("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'workshop'
+                """)
+                colset = {r["column_name"] for r in cols}
+
+                if "address" in colset:
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO workshop (name, razon_social, province, city, address, phone, cuit, plant_number, is_approved)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false)
+                        RETURNING id, name, razon_social, province, city, address, phone, cuit, plant_number, is_approved
+                        """,
+                        name, razon_social, province, city, address, phone, cuit_norm, plant_number
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number, is_approved)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,false)
+                        RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, is_approved
+                        """,
+                        name, razon_social, province, city, phone, cuit_norm, plant_number
+                    )
+                ws_id = row["id"]
+
+                # asignar OWNER al creador
+                await conn.execute(
+                    """
+                    INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (workshop_id, user_id) DO UPDATE SET user_type_id = EXCLUDED.user_type_id
+                    """,
+                    ws_id, user_id, OWNER_ROLE_ID
+                )
+
+                # inicializar steps y observaciones por defecto igual que tu create actual
+                steps = await conn.fetch("SELECT id, name FROM steps ORDER BY id ASC")
+                if not steps:
+                    raise RuntimeError("No hay pasos base en la tabla steps")
+
+                for idx, s in enumerate(steps):
+                    await conn.execute(
+                        """
+                        INSERT INTO steps_order (workshop_id, step_id, number)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        ws_id, s["id"], idx + 1
+                    )
+                    defaults = [
+                        "Verificación visual",
+                        "Desgaste o grietas",
+                        "Fijaciones y holguras",
+                        "Funcionamiento general",
+                        "Medidas y tolerancias",
+                    ]
+                    for desc in defaults:
+                        await conn.execute(
+                            """
+                            INSERT INTO observations (workshop_id, step_id, description)
+                            SELECT $1, $2, $3
+                            WHERE NOT EXISTS (
+                              SELECT 1 FROM observations
+                              WHERE workshop_id = $1 AND step_id = $2 AND description = $3
+                            )
+                            """,
+                            ws_id, s["id"], desc
+                        )
+
+        except UniqueViolationError as e:
+            msg = "Ya existe un workshop con ese nombre"
+            if "workshop_cuit_uidx" in str(e):
+                msg = "Ya existe un workshop con ese CUIT"
+            return jsonify({"error": msg}), 409
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 500
+
+    # armar respuesta consistente
+    out = {
+        "id": row["id"],
+        "name": row["name"],
+        "razonSocial": row["razon_social"],
+        "province": row["province"],
+        "city": row["city"],
+        "phone": row["phone"],
+        "cuit": row["cuit"],
+        "plant_number": row["plant_number"],
+        "is_approved": row["is_approved"],
+    }
+    if "address" in row.keys():
+        out["address"] = row["address"]
+
+    return jsonify({
+        "message": "Workshop creado en estado pendiente de aprobación",
+        "workshop": out,
+        "membership": {
+            "user_id": user_id,
+            "workshop_id": row["id"],
+            "user_type_id": OWNER_ROLE_ID
+        }
+    }), 201
+    
+    
+@workshops_bp.route("/<int:workshop_id>/approve", methods=["POST"])
+async def approve_workshop(workshop_id: int):
+    # acá podrías validar que g.user_id sea admin
+    async with get_conn_ctx() as conn:
+        result = await conn.fetchrow(
+            """
+            UPDATE workshop
+            SET is_approved = true, updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, is_approved
+            """,
+            workshop_id
+        )
+    if not result:
+        return jsonify({"error": "Workshop no encontrado"}), 404
+    return jsonify({"ok": True, "workshop_id": result["id"], "is_approved": result["is_approved"]}), 200
+
+
+@workshops_bp.route("/pending", methods=["GET"])
+async def list_pending_workshops():
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, razon_social, province, city, phone, cuit, plant_number
+            FROM workshop
+            WHERE is_approved = false
+            ORDER BY id DESC
+            """
+        )
+    return jsonify([dict(r) for r in rows]), 200
+
+
 # Crear workshop
 @workshops_bp.route("/create", methods=["POST"])
 async def create_workshop():

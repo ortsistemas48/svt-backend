@@ -43,6 +43,34 @@ async def get_user_by_email():
     return jsonify(dict(row) if row else None)
 
 
+@users_bp.route("/by-email-lite", methods=["GET"])
+async def get_user_by_email_lite():
+    email = request.args.get("email")
+
+    if not email:
+        return jsonify({"error": "email requerido"}), 400
+    print(email)
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                u.id::text AS id,
+                u.first_name,
+                u.last_name,
+                u.email,
+                u.dni,
+                u.phone_number,
+                u.title_name,
+                u.licence_number
+            FROM users u
+            WHERE LOWER(u.email) = LOWER($1)
+            LIMIT 1
+            """,
+            email
+        )
+    print(dict(row))
+    return jsonify(dict(row) if row else None)
+
 
 @users_bp.route("/get_users/workshop/<int:workshop_id>", methods=["GET"])
 async def get_users_in_workshop(workshop_id: int):
