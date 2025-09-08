@@ -7,6 +7,8 @@ from .stickers import stickers_bp
 from .inspections import inspections_bp
 from .certificates import certificates_bp
 from .application_documents import docs_bp
+from .persons import persons_bp
+
 
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/auth")
@@ -18,3 +20,5 @@ def register_routes(app):
     app.register_blueprint(inspections_bp, url_prefix="/inspections")
     app.register_blueprint(certificates_bp, url_prefix="/certificates")
     app.register_blueprint(docs_bp, url_prefix="/docs")
+    app.register_blueprint(persons_bp, url_prefix="/persons")
+
