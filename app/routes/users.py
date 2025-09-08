@@ -340,17 +340,27 @@ async def list_user_types():
 @users_bp.route("/assign/<int:workshop_id>", methods=["POST"])
 async def attach_user_to_workshop(workshop_id: int):
     data = await request.get_json()
-    user_id = data.get("user_id")
+    user_id = data.get("user_id")          # UUID string
     user_type_id = data.get("user_type_id")
 
     if not user_id or not user_type_id:
         return jsonify({"error": "user_id y user_type_id son requeridos"}), 400
 
-    async with get_conn_ctx() as conn:
-        await conn.execute("""
-            INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (workshop_id, user_id) DO UPDATE SET user_type_id = EXCLUDED.user_type_id
-        """, workshop_id, user_id, user_type_id)
+    # valida UUID
+    try:
+        _as_uuid(user_id)
+    except ValueError:
+        return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
 
-    return jsonify({"ok": True})
+    async with get_conn_ctx() as conn:
+        await conn.execute(
+            """
+            INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
+            VALUES ($1, $2::uuid, $3)
+            ON CONFLICT (workshop_id, user_id)
+            DO UPDATE SET user_type_id = EXCLUDED.user_type_id
+            """,
+            workshop_id, user_id, user_type_id
+        )
+
+    return jsonify({"ok": True}), 200

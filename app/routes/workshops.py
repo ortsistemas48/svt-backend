@@ -1,6 +1,7 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
 from asyncpg.exceptions import UniqueViolationError
+from uuid import UUID
 
 workshops_bp = Blueprint("workshops", __name__, url_prefix="/workshops")
 
@@ -24,6 +25,13 @@ def _clean_int_or_none(v, field_name: str):
         raise ValueError(f"El {field_name} debe ser numérico y mayor a cero")
     
     
+async def _is_admin(conn, user_id: int) -> bool:
+    # ajustá según tu schema, por ejemplo users.is_admin boolean
+    return await conn.fetchval(
+        "SELECT COALESCE(is_admin, false) FROM users WHERE id = $1",
+        user_id
+    )
+
 @workshops_bp.route("/create-unapproved", methods=["POST"])
 async def create_workshop_unapproved():
     user_id = g.get("user_id")
@@ -470,10 +478,12 @@ async def get_workshop(workshop_id: int):
         return jsonify({"error": "No autorizado"}), 401
 
     async with get_conn_ctx() as conn:
-        # opcional, solo miembros pueden ver
-        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
-        if not belongs:
-            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        is_admin = await _is_admin(conn, user_id)
+        # solo bloquear si no es admin y no pertenece
+        if not is_admin:
+            belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+            if not belongs:
+                return jsonify({"error": "No tenés acceso a este taller"}), 403
 
         row = await conn.fetchrow(
             """
@@ -488,7 +498,138 @@ async def get_workshop(workshop_id: int):
 
     return jsonify(_camel_ws_row(row)), 200
 
-# ====== 2) Editar datos del taller ======
+
+@workshops_bp.route("/admin/<int:workshop_id>/members", methods=["GET"])
+async def admin_list_workshop_members(workshop_id: int):
+    # si en tu middleware pones g.user_id, podés usarlo, si no, cambialo
+    from quart import g
+    admin_id = g.get("user_id")
+    if not admin_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        if not await _is_admin(conn, admin_id):
+            return jsonify({"error": "Requiere admin"}), 403
+
+        exists = await conn.fetchval("SELECT 1 FROM workshop WHERE id = $1", workshop_id)
+        if not exists:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        rows = await conn.fetch(
+            """
+            SELECT
+              u.id::text          AS user_id,
+              u.first_name,
+              u.last_name,
+              u.email,
+              u.dni,
+              u.phone_number,
+              ut.name             AS role,
+              wu.user_type_id,
+              wu.created_at
+            FROM workshop_users wu
+            JOIN users u      ON u.id = wu.user_id
+            LEFT JOIN user_types ut ON ut.id = wu.user_type_id
+            WHERE wu.workshop_id = $1
+            ORDER BY wu.user_type_id NULLS LAST, u.last_name, u.first_name
+            """,
+            workshop_id
+        )
+
+    return jsonify([dict(r) for r in rows]), 200
+
+
+@workshops_bp.route("/admin/<int:workshop_id>/members/<int:member_user_id>", methods=["DELETE"])
+async def admin_unassign_member(workshop_id: int, member_user_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        if not await _is_admin(conn, user_id):
+            return jsonify({"error": "Requiere admin"}), 403
+
+        # no permitas dejar el taller sin OWNER, opcional:
+        owner_left = await conn.fetchval(
+            """
+            SELECT (SELECT COUNT(*) FROM workshop_users WHERE workshop_id=$1 AND user_type_id=$2) = 1
+                   AND EXISTS(SELECT 1 FROM workshop_users WHERE workshop_id=$1 AND user_id=$3 AND user_type_id=$2)
+            """,
+            workshop_id, OWNER_ROLE_ID, member_user_id
+        )
+        if owner_left:
+            return jsonify({"error": "No se puede quitar al único OWNER del taller"}), 400
+
+        result = await conn.execute(
+            """
+            DELETE FROM workshop_users
+            WHERE workshop_id = $1 AND user_id = $2
+            """,
+            workshop_id, member_user_id
+        )
+    return jsonify({"ok": True, "result": result}), 200
+
+def _as_uuid(s: str) -> UUID:
+    return UUID(s)  # lanza ValueError si no es UUID
+
+
+@workshops_bp.route("/admin/<int:workshop_id>/members/<user_id>", methods=["DELETE", "OPTIONS"])
+async def admin_unassign_workshop_member(workshop_id: int, user_id: str):
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    from quart import g
+    admin_id = g.get("user_id")
+    if not admin_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    # validar UUID
+    try:
+        _as_uuid(user_id)
+    except ValueError:
+        return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
+
+    OWNER_ROLE_ID = 2
+
+    async with get_conn_ctx() as conn:
+        if not await _is_admin(conn, admin_id):
+            return jsonify({"error": "Requiere admin"}), 403
+
+        exists = await conn.fetchval("SELECT 1 FROM workshop WHERE id = $1", workshop_id)
+        if not exists:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        # evitar dejar el taller sin owner, opcional pero recomendado
+        is_last_owner = await conn.fetchval(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM workshop_users
+               WHERE workshop_id = $1 AND user_type_id = $2) = 1
+              AND EXISTS(
+                SELECT 1 FROM workshop_users
+                WHERE workshop_id = $1 AND user_id = $3::uuid AND user_type_id = $2
+              )
+            """,
+            workshop_id, OWNER_ROLE_ID, user_id
+        )
+        if is_last_owner:
+            return jsonify({"error": "No se puede quitar al único OWNER del taller"}), 400
+
+        result = await conn.execute(
+            """
+            DELETE FROM workshop_users
+            WHERE workshop_id = $1 AND user_id = $2::uuid
+            """,
+            workshop_id, user_id
+        )
+
+    # asyncpg devuelve "DELETE n"
+    if result.endswith("0"):
+        return jsonify({"error": "Usuario no estaba asignado a este taller"}), 404
+
+    return jsonify({"ok": True, "workshop_id": workshop_id, "user_id": user_id}), 200
+
+
 @workshops_bp.route("/<int:workshop_id>", methods=["PATCH", "PUT"])
 async def update_workshop(workshop_id: int):
     user_id = g.get("user_id")
