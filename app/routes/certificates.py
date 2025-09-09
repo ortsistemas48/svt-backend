@@ -227,15 +227,17 @@ async def certificates_generate_by_application(app_id: int):
     }
     """
     payload = await request.get_json() or {}
-    condicion = (payload.get("condicion") or "Apto").strip().lower()
+    condicion_raw = (payload.get("condicion") or "Apto").strip().lower()
 
-    # templates por condición
+    cond_map = {"apto": "Apto", "condicional": "Condicional", "rechazado": "Rechazado"}
+    condicion = cond_map.get(condicion_raw, "Apto")
+
     templates_por_cond = {
         "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_apto.pdf",
         "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_apto.pdf",
         "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_apto.pdf",
     }
-    template_url = templates_por_cond.get(condicion, templates_por_cond["apto"])
+    template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
     # bajar template como bytes
     try:
@@ -249,41 +251,46 @@ async def certificates_generate_by_application(app_id: int):
         row = await conn.fetchrow(
             """
             SELECT
-              a.id                       AS application_id,
-              a.date                     AS app_date,
-              a.status                   AS app_status,
-              a.result                   AS app_result,
-              a.workshop_id              AS workshop_id,
+            a.id                       AS application_id,
+            a.date                     AS app_date,
+            a.status                   AS app_status,
+            a.result                   AS app_result,
+            a.workshop_id              AS workshop_id,
 
-              o.first_name               AS owner_first_name,
-              o.last_name                AS owner_last_name,
-              o.dni                      AS owner_dni,
-              o.street                   AS owner_street,
-              o.city                     AS owner_city,
-              o.province                 AS owner_province,
+            o.first_name               AS owner_first_name,
+            o.last_name                AS owner_last_name,
+            o.dni                      AS owner_dni,
+            o.street                   AS owner_street,
+            o.city                     AS owner_city,
+            o.province                 AS owner_province,
 
-              d.first_name               AS driver_first_name,
-              d.last_name                AS driver_last_name,
-              d.dni                      AS driver_dni,
+            d.first_name               AS driver_first_name,
+            d.last_name                AS driver_last_name,
+            d.dni                      AS driver_dni,
 
-              c.license_plate            AS car_plate,
-              c.brand                    AS car_brand,
-              c.model                    AS car_model,
-              c.manufacture_year         AS car_year,
-              c.engine_brand             AS engine_brand,
-              c.engine_number            AS engine_number,
-              c.chassis_brand            AS chassis_brand,
-              c.chassis_number           AS chassis_number,
-              c.fuel_type                AS fuel_type,
-              c.insurance                AS insurance,
+            c.license_plate            AS car_plate,
+            c.brand                    AS car_brand,
+            c.model                    AS car_model,
+            c.manufacture_year         AS car_year,
+            c.engine_brand             AS engine_brand,
+            c.engine_number            AS engine_number,
+            c.chassis_brand            AS chassis_brand,
+            c.chassis_number           AS chassis_number,
+            c.fuel_type                AS fuel_type,
+            c.insurance                AS insurance,
+            c.vehicle_type             AS vehicle_type,
+            c.usage_type               AS usage_type,
 
-              ws.name                    AS workshop_name,
-              ws.plant_number            AS workshop_plant_number
+            ws.razon_social AS workshop_name,
+            ws.plant_number            AS workshop_plant_number,
+
+            s.sticker_number           AS sticker_number
             FROM applications a
-            LEFT JOIN persons o ON o.id = a.owner_id
-            LEFT JOIN persons d ON d.id = a.driver_id
-            LEFT JOIN cars    c ON c.id = a.car_id
-            LEFT JOIN workshop ws ON ws.id = a.workshop_id
+            LEFT JOIN persons   o  ON o.id  = a.owner_id
+            LEFT JOIN persons   d  ON d.id  = a.driver_id
+            LEFT JOIN cars      c  ON c.id  = a.car_id
+            LEFT JOIN workshop  ws ON ws.id = a.workshop_id
+            LEFT JOIN stickers  s  ON s.id  = c.sticker_id
             WHERE a.id = $1
             """,
             app_id
@@ -291,7 +298,6 @@ async def certificates_generate_by_application(app_id: int):
         if not row:
             return jsonify({"error": "Trámite no encontrado"}), 404
 
-        # Traer inspección más reciente, incluyendo created_at si existe
         insp = await conn.fetchrow(
             """
             SELECT i.id, i.global_observations
@@ -302,19 +308,30 @@ async def certificates_generate_by_application(app_id: int):
             """,
             app_id
         )
-
+            
     owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
     documento = row["owner_dni"] or row["driver_dni"]
     domicilio = row["owner_street"]
     localidad = row["owner_city"]
     provincia = row["owner_province"]
 
-    fecha_emision_dt = insp["created_at"] if insp and "created_at" in insp and insp["created_at"] else row["app_date"]
+    # fecha de emisión, usa created_at de la inspección si existe
+    fecha_emision_dt = insp["created_at"] if insp and "created_at" in insp else row["app_date"]
     fecha_emision = _fmt_date(fecha_emision_dt)
     fecha_vencimiento = _fmt_date(datetime.utcnow() + timedelta(days=365)) if fecha_emision else None
 
-    # si te viene "condicion" pisamos resultado
-    resultado = (payload.get("condicion") or row["app_result"] or row["app_status"] or "Apto")
+    # condición final
+    resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
+
+    # clasificación en 2 líneas: tipo de vehículo y tipo de uso
+    clasificacion = ""
+    if row["vehicle_type"] or row["usage_type"]:
+        vt = (row["vehicle_type"] or "").strip()
+        ut = (row["usage_type"] or "").strip()
+        clasificacion = f"{vt}\n{ut}".strip()
+
+    # número CRT ahora es el número de oblea
+    crt_numero = str(row["sticker_number"] or "")
 
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
@@ -322,15 +339,15 @@ async def certificates_generate_by_application(app_id: int):
 
         "${fecha_em}":              fecha_emision or "",
         "${fecha_vto}":             fecha_vencimiento or "",
-        "${taller}":                row["workshop_name"] or "",
-        "${num_reg}":               str(row["workshop_plant_number"] or ""),
+        "${taller}":                row["workshop_name"] or "",         # razón social o nombre
+        "${num_reg}":               str(row["workshop_plant_number"] or ""),  # número de planta
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      owner_fullname or "",
+        "${nombre_apellido2}":      f"{owner_fullname} (D.N.I. {str(documento)}) - TITULAR" or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
         "${localidad}":             localidad or "",
-        "${localidad2}":            localidad or "",
+        "${localidad2}":            f"{localidad} ({provincia})" or "",
         "${provincia}":             provincia or "",
         "${provincia2}":            provincia or "",
         "${dominio}":               row["car_plate"] or "",
@@ -342,12 +359,12 @@ async def certificates_generate_by_application(app_id: int):
         "${combustible}":           row["fuel_type"] or "",
         "${marca_chasis}":          row["chassis_brand"] or "",
         "${numero_chasis}":         row["chassis_number"] or "",
-        "${tipo_vehiculo}":         "Automóvil" if row["car_brand"] or row["car_model"] else "",
+        "${tipo_vehiculo}":         row["vehicle_type"] or "",
         "${resultado_inspeccion}":  resultado,
         "${observaciones}":         (insp["global_observations"] if insp and insp["global_observations"] else ""),
-        "${clasif}":                "",
+        "${clasif}":                clasificacion,
         "${resultado2}":            "",
-        "${crt_numero}":            f"CRT-{row['application_id']}",
+        "${crt_numero}":            crt_numero,  # número de oblea
     }
 
     # abrir template desde bytes
@@ -367,18 +384,43 @@ async def certificates_generate_by_application(app_id: int):
     doc.close()
     pdf_bytes = out_buf.getvalue()
 
-    # ruta en el bucket
     output_name = payload.get("output_name") or "certificado.pdf"
-    storage_path = f"certificados/{app_id}/certificado.pdf"  # fijo como pediste
+    storage_path = f"certificados/{app_id}/certificado.pdf"
 
     try:
         public_url = _upload_pdf_and_get_public_url(pdf_bytes, storage_path)
     except Exception as e:
         return jsonify({"error": f"No se pudo subir a Supabase Storage, {e}"}), 502
 
+    try:
+        async with get_conn_ctx() as conn:
+            await conn.execute(
+                """
+                UPDATE applications
+                SET status = $1,
+                    result = $2
+                WHERE id = $3
+                """,
+                "Completado",
+                resultado,
+                app_id,
+            )
+    except Exception as e:
+        return jsonify({
+            "error": f"PDF generado, pero no se pudo actualizar el estado del trámite, {e}",
+            "application_id": app_id,
+            "template_url": template_url,
+            "storage_bucket": BUCKET_CERTS,
+            "storage_path": storage_path,
+            "public_url": public_url,
+            "replacements": counts
+        }), 207
+
     return jsonify({
-        "message": "PDF generado",
+        "message": "PDF generado y trámite actualizado",
         "application_id": app_id,
+        "new_status": "Completado",
+        "new_result": resultado,
         "template_url": template_url,
         "storage_bucket": BUCKET_CERTS,
         "storage_path": storage_path,
