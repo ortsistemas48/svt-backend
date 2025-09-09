@@ -411,7 +411,7 @@ async def me():
             return jsonify({"error": "Usuario no encontrado"}), 404
 
         workshops = await conn.fetch("""
-            SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role, wu.user_type_id
+            SELECT wu.workshop_id, w.name AS workshop_name, ut.name AS role, wu.user_type_id, w.is_approved as is_approved
             FROM workshop_users wu
             JOIN workshop w ON wu.workshop_id = w.id
             JOIN user_types ut ON wu.user_type_id = ut.id
