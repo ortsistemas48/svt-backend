@@ -363,7 +363,7 @@ async def check_workshop_membership(workshop_id: int):
     """
     Devuelve si el usuario autenticado (g.user_id) pertenece al taller indicado.
     - 401 si no hay usuario autenticado.
-    - 404 si el taller no existe.
+    - 404 si el taller no existe o no está aprobado.
     - 200 con is_member=True/False si el taller existe.
     """
     user_id = g.get("user_id")
@@ -371,11 +371,14 @@ async def check_workshop_membership(workshop_id: int):
         return jsonify({"error": "No autorizado"}), 401
 
     async with get_conn_ctx() as conn:
-        # 1) verificar que el taller exista
-        exists = await conn.fetchval("SELECT 1 FROM workshop WHERE id = $1", workshop_id)
-        print(f"exists={exists}")
-        if not exists:
+        # 1) verificar que el taller exista y esté aprobado
+        workshop = await conn.fetchrow("SELECT id, is_approved FROM workshop WHERE id = $1", workshop_id)
+        print(f"workshop={workshop}")
+        if not workshop:
             return jsonify({"error": "Workshop no encontrado"}), 404
+        
+        if not workshop["is_approved"]:
+            return jsonify({"error": "Workshop no se encuentra aprobado"}), 404
 
         # 2) verificar membresía (y devolver rol si existe)
         row = await conn.fetchrow(
