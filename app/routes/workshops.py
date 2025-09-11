@@ -366,6 +366,7 @@ async def check_workshop_membership(workshop_id: int):
     - 404 si el taller no existe o no está aprobado.
     - 200 con is_member=True/False si el taller existe.
     """
+    
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
