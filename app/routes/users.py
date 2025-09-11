@@ -364,3 +364,34 @@ async def attach_user_to_workshop(workshop_id: int):
         )
 
     return jsonify({"ok": True}), 200
+
+
+@users_bp.route("/user-type-in-workshop", methods=["GET"])
+async def get_user_type_in_workshop():
+    user_id = request.args.get("userId")
+    workshop_id = request.args.get("workshopId", type=int)
+
+    if not user_id or not workshop_id:
+        return jsonify({"error": "userId y workshopId son requeridos"}), 400
+
+    # valida UUID
+    try:
+        _as_uuid(user_id)
+    except ValueError:
+        return jsonify({"error": "userId inválido, debe ser UUID"}), 400
+
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT ut.id, ut.name
+            FROM workshop_users wu
+            JOIN user_types ut ON wu.user_type_id = ut.id
+            WHERE wu.user_id = $1::uuid AND wu.workshop_id = $2
+            """,
+            user_id, workshop_id
+        )
+
+    if not row:
+        return jsonify({"error": "No se encontró el usuario en el workshop"}), 404
+
+    return jsonify(dict(row)), 200
