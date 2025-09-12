@@ -21,7 +21,7 @@ async def register():
     Opcionales:
       dni, phone_number
     Si el rol es Ingeniero (id=3), opcionales adicionales:
-      licence_number, title_name
+      license_number, title_name
     """
     data = await request.get_json()
 
@@ -35,7 +35,7 @@ async def register():
     workshop_id      = data.get("workshop_id")
     user_type_id     = data.get("user_type_id")
 
-    licence_number = data.get("licence_number") or data.get("nro_matricula")
+    license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
 
     ENGINEER_ROLE_ID = 3
@@ -49,7 +49,7 @@ async def register():
     is_engineer = int(user_type_id) == ENGINEER_ROLE_ID
     if not is_engineer:
         # Si no es ingeniero, no guardamos estos valores
-        licence_number = None
+        license_number = None
         title_name = None
 
     async with get_conn_ctx() as conn:
@@ -64,7 +64,7 @@ async def register():
                 """
                 INSERT INTO users (
                     email, first_name, last_name, phone_number, dni, password,
-                    licence_number, title_name,
+                    license_number, title_name,
                     created_at, is_active, is_approved
                 )
                 VALUES ($1, $2, $3, $4, $5, $6,
@@ -73,7 +73,7 @@ async def register():
                 RETURNING id
                 """,
                 email, first_name, last_name, phone_number, dni, hashed_password,
-                licence_number, title_name
+                license_number, title_name
             )
             user_id = user_row["id"]
 
@@ -96,7 +96,7 @@ async def register_bulk():
     Opcionales:
       dni, phone_number
     Si el rol es Ingeniero (id=3), opcionales adicionales:
-      licence_number, title_name
+      license_number, title_name
     """
     data = await request.get_json()
 
@@ -110,7 +110,7 @@ async def register_bulk():
     workshop_id      = data.get("workshop_id")
     user_type_id     = data.get("user_type_id")
 
-    licence_number = data.get("licence_number") or data.get("nro_matricula")
+    license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
 
     ENGINEER_ROLE_ID = 3
@@ -124,7 +124,7 @@ async def register_bulk():
     is_engineer = int(user_type_id) == ENGINEER_ROLE_ID
     if not is_engineer:
         # Si no es ingeniero, no guardamos estos valores
-        licence_number = None
+        license_number = None
         title_name = None
 
     async with get_conn_ctx() as conn:
@@ -139,7 +139,7 @@ async def register_bulk():
                 """
                 INSERT INTO users (
                     email, first_name, last_name, phone_number, dni, password,
-                    licence_number, title_name,
+                    license_number, title_name,
                     created_at, is_active, is_approved
                 )
                 VALUES ($1, $2, $3, $4, $5, $6,
@@ -148,7 +148,7 @@ async def register_bulk():
                 RETURNING id
                 """,
                 email, first_name, last_name, phone_number, dni, hashed_password,
-                licence_number, title_name
+                license_number, title_name
             )
             user_id = user_row["id"]
 

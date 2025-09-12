@@ -26,7 +26,7 @@ async def get_user_by_email():
                 u.dni,
                 u.phone_number,
                 u.title_name,
-                u.licence_number,
+                u.license_number,
                 wu.user_type_id
             FROM users u
             LEFT JOIN workshop_users wu
@@ -61,7 +61,7 @@ async def get_user_by_email_lite():
                 u.dni,
                 u.phone_number,
                 u.title_name,
-                u.licence_number
+                u.license_number
             FROM users u
             WHERE LOWER(u.email) = LOWER($1)
             LIMIT 1
@@ -76,7 +76,7 @@ async def get_user_by_email_lite():
 async def get_users_in_workshop(workshop_id: int):
     async with get_conn_ctx() as conn:
         users = await conn.fetch("""
-            SELECT u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number, ut.name AS role
+            SELECT u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number, u.title_name, u.license_number, ut.name AS role
             FROM workshop_users wu
             JOIN users u ON wu.user_id = u.id
             JOIN user_types ut ON wu.user_type_id = ut.id
