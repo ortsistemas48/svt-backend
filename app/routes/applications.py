@@ -264,8 +264,8 @@ async def get_application(id):
         application = await conn.fetchrow("""
             SELECT id, user_id, date, workshop_id, status, result
             FROM applications
-            WHERE id = $1 AND user_id = $2
-        """, id, user_id)
+            WHERE id = $1 
+        """, id)
 
     if not application:
         return jsonify({"error": "Trámite no encontrado"}), 404
@@ -283,8 +283,8 @@ async def get_application_full(id):
         application = await conn.fetchrow("""
             SELECT id, owner_id, driver_id, car_id
             FROM applications
-            WHERE id = $1 AND user_id = $2
-        """, id, user_id)
+            WHERE id = $1
+        """, id)
 
         if not application:
             return jsonify({"error": "Trámite no encontrado"}), 404
@@ -392,12 +392,11 @@ async def list_full_applications_by_workshop(workshop_id: int):
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
-    # --- Query params ---
     try:
         page = int(request.args.get("page", 1))
         per_page = int(request.args.get("per_page", 10))
         page = max(1, page)
-        per_page = max(1, min(per_page, 100))  # cap de seguridad
+        per_page = max(1, min(per_page, 100))
     except ValueError:
         return jsonify({"error": "Parámetros inválidos"}), 400
 
@@ -407,10 +406,12 @@ async def list_full_applications_by_workshop(workshop_id: int):
     offset = (page - 1) * per_page
 
     # --- Filtros dinámicos ---
-    filters = ["a.workshop_id = $1"]
+    filters = [
+        "a.workshop_id = $1",
+        "a.is_deleted IS NOT TRUE"   # <<<<<< EXCLUIR ELIMINADOS
+    ]
     params = [workshop_id]
 
-    # Búsqueda (patrón similar a tu front)
     if q:
         filters.append("""
             (
@@ -422,16 +423,10 @@ async def list_full_applications_by_workshop(workshop_id: int):
         """)
         params.append(f"%{q}%")
 
-    # Filtro de estado opcional: status_in=En Cola,En curso
     if status_list:
         filters.append(f"a.status = ANY(${len(params)+1}::text[])")
         params.append(status_list)
 
-    # ---- Filtro "no vacío" (equivalente a isDataEmpty) ----
-    # Se excluyen aplicaciones donde car Y owner están vacíos (ignorando id/is_owner/owner_id/driver_id).
-    # Consideramos "no vacío":
-    #   car: license_plate/brand/model con texto no vacío
-    #   owner: first_name/last_name con texto no vacío o dni no nulo
     filters.append("""
         (
             ( NULLIF(trim(c.license_plate), '') IS NOT NULL
@@ -449,7 +444,6 @@ async def list_full_applications_by_workshop(workshop_id: int):
     where_sql = " AND ".join(f"({f.strip()})" for f in filters)
 
     async with get_conn_ctx() as conn:
-        # --- Total para paginación ---
         total = await conn.fetchval(
             f"""
             SELECT COUNT(*)
@@ -461,7 +455,6 @@ async def list_full_applications_by_workshop(workshop_id: int):
             *params
         )
 
-        # --- Página de items ---
         limit_idx  = len(params) + 1
         offset_idx = len(params) + 2
 
@@ -472,15 +465,12 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 a.user_id,
                 a.date,
                 a.status,
-                -- Owner mínimo
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
-                -- Driver mínimo (si lo necesitás en UI, lo dejamos también)
                 d.first_name  AS driver_first_name,
                 d.last_name   AS driver_last_name,
                 d.dni         AS driver_dni,
-                -- Car mínimo
                 c.license_plate,
                 c.brand,
                 c.model
@@ -627,3 +617,25 @@ async def list_completed_applications_by_workshop(workshop_id: int):
             )
 
     return jsonify(result), 200
+
+
+@applications_bp.route("/<int:app_id>/soft-delete", methods=["POST"])
+async def soft_delete_application(app_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        exists = await conn.fetchval(
+            "SELECT id FROM applications WHERE id = $1",
+            app_id
+        )
+        if not exists:
+            return jsonify({"error": "Trámite no encontrado o sin permiso"}), 404
+
+        await conn.execute(
+            "UPDATE applications SET is_deleted = TRUE WHERE id = $1",
+            app_id
+        )
+
+    return jsonify({"message": "Trámite marcado como eliminado"}), 200
