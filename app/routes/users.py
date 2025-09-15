@@ -80,13 +80,47 @@ async def get_users_in_workshop(workshop_id: int):
             FROM workshop_users wu
             JOIN users u ON wu.user_id = u.id
             JOIN user_types ut ON wu.user_type_id = ut.id
-            WHERE wu.workshop_id = $1;
+            WHERE wu.workshop_id = $1 AND u.deleted_at IS NULL;
+
         """, workshop_id)
 
     return jsonify({
         "workshop_id": workshop_id,
         "users": [dict(user) for user in users]
     })
+    
+
+@users_bp.route("/delete/<user_id>", methods=["POST", "OPTIONS"])
+async def soft_delete_user(user_id: str):
+    # Preflight CORS
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    # Validar UUID si aplica, si tu users.id es integer podés omitir esto
+    try:
+        _as_uuid(user_id)
+        id_value = f"{user_id}"
+        cast = "::uuid"
+    except ValueError:
+        # Soporta también ids numéricos si tu tabla no usa UUID
+        if not user_id.isdigit():
+            return jsonify({"error": "user_id inválido"}), 400
+        id_value = int(user_id)
+        cast = "::int"
+
+    async with get_conn_ctx() as conn:
+        result = await conn.execute(f"""
+            UPDATE users
+               SET deleted_at = NOW()
+             WHERE id = $1{cast}
+               AND deleted_at IS NULL
+        """, id_value)
+
+    # asyncpg devuelve por ejemplo "UPDATE 1" o "UPDATE 0"
+    if result.endswith("0"):
+        return jsonify({"error": "Usuario no encontrado o ya eliminado"}), 404
+
+    return jsonify({"ok": True, "user_id": user_id, "deleted": True}), 200
 
 
 @users_bp.route("/get_users/all", methods=["GET"])
@@ -124,6 +158,7 @@ async def get_all_users():
             FROM users u
             LEFT JOIN workshop_users wu ON wu.user_id = u.id
             LEFT JOIN user_types ut ON ut.id = wu.user_type_id
+            WHERE u.deleted_at IS NULL
             GROUP BY u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number
             ORDER BY u.id
             LIMIT $1 OFFSET $2;
@@ -189,7 +224,7 @@ async def get_pending_users():
             FROM users u
             LEFT JOIN workshop_users wu ON wu.user_id = u.id
             LEFT JOIN user_types ut ON ut.id = wu.user_type_id
-            WHERE u.is_approved = false
+            WHERE u.is_approved = false AND u.deleted_at IS NULL
             GROUP BY u.id, u.first_name, u.last_name, u.email, u.dni, u.created_at
             ORDER BY u.id
             LIMIT $1 OFFSET $2;

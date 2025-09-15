@@ -47,7 +47,10 @@ async def create_workshop_unapproved():
     phone = (data.get("phone") or "").strip()
     cuit = (data.get("cuit") or "").strip()
     plant_number_raw = data.get("plantNumber")
-
+    disposition_number = (data.get("dispositionNumber") or "").strip()
+    
+    if not disposition_number:
+        return jsonify({"error": "Falta el número de disposición"}), 400
     if len(name) < 3:
         return jsonify({"error": "El nombre debe tener al menos 3 caracteres"}), 400
     if len(razon_social) < 3:
@@ -81,20 +84,20 @@ async def create_workshop_unapproved():
                 if "address" in colset:
                     row = await conn.fetchrow(
                         """
-                        INSERT INTO workshop (name, razon_social, province, city, address, phone, cuit, plant_number, is_approved)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false)
-                        RETURNING id, name, razon_social, province, city, address, phone, cuit, plant_number, is_approved
+                        INSERT INTO workshop (name, razon_social, province, city, address, phone, cuit, plant_number, disposition_number, is_approved)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false)
+                        RETURNING id, name, razon_social, province, city, address, phone, cuit, plant_number, disposition_number, is_approved
                         """,
-                        name, razon_social, province, city, address, phone, cuit_norm, plant_number
+                        name, razon_social, province, city, address, phone, cuit_norm, plant_number, disposition_number
                     )
                 else:
                     row = await conn.fetchrow(
                         """
-                        INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number, is_approved)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,false)
-                        RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, is_approved
+                        INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number, disposition_number, is_approved)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false)
+                        RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number, is_approved
                         """,
-                        name, razon_social, province, city, phone, cuit_norm, plant_number
+                        name, razon_social, province, city, phone, cuit_norm, plant_number, disposition_number
                     )
                 ws_id = row["id"]
 
@@ -160,6 +163,7 @@ async def create_workshop_unapproved():
         "phone": row["phone"],
         "cuit": row["cuit"],
         "plant_number": row["plant_number"],
+        "disposition_number": row["disposition_number"],
         "is_approved": row["is_approved"],
     }
     if "address" in row.keys():
@@ -199,7 +203,7 @@ async def list_pending_workshops():
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, name, razon_social, province, city, phone, cuit, plant_number
+            SELECT id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
             FROM workshop
             WHERE is_approved = false
             ORDER BY id DESC
@@ -225,6 +229,7 @@ async def create_workshop():
     phone = (data.get("phone") or "").strip()
     cuit = (data.get("cuit") or "").strip()
     plant_number_raw = (data.get("plantNumber") or None)
+    disposition_number = (data.get("disposition_number") or "").strip()
 
     # Validaciones
     if len(name) < 3:
@@ -268,11 +273,11 @@ async def create_workshop():
                 # 1) crear workshop
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    RETURNING id, name, razon_social, province, city, phone, cuit, plant_number
+                    INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number, disposition_number)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
                     """,
-                    name, razon_social, province, city, phone_norm, cuit_norm, plant_number
+                    name, razon_social, province, city, phone_norm, cuit_norm, plant_number, disposition_number
                 )
                 ws_id = row["id"]
 
@@ -472,6 +477,7 @@ def _camel_ws_row(row) -> dict:
         "city": row["city"],
         # Mantengo snake por compatibilidad, si querés camel cambiá a plantNumber
         "plant_number": row["plant_number"],
+        "disposition_number": row["disposition_number"],
     }
 
 # ====== 1) Obtener datos del taller ======
@@ -491,7 +497,7 @@ async def get_workshop(workshop_id: int):
 
         row = await conn.fetchrow(
             """
-            SELECT id, name, razon_social, province, city, phone, cuit, plant_number
+            SELECT id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
             FROM workshop
             WHERE id = $1
             """,
@@ -682,7 +688,7 @@ async def update_workshop(workshop_id: int):
                 UPDATE workshop
                 SET {", ".join(sets)}, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ${idx}
-                RETURNING id, name, razon_social, province, city, phone, cuit, plant_number
+                RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
                 """,
                 *vals, workshop_id
             )
