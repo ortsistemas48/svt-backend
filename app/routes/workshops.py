@@ -2,6 +2,7 @@ from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
 from asyncpg.exceptions import UniqueViolationError
 from uuid import UUID
+import json
 
 workshops_bp = Blueprint("workshops", __name__, url_prefix="/workshops")
 
@@ -547,6 +548,84 @@ async def admin_list_workshop_members(workshop_id: int):
         )
 
     return jsonify([dict(r) for r in rows]), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/members/<uuid:member_user_id>", methods=["DELETE"])
+async def owner_unassign_member(workshop_id: int, member_user_id: UUID):
+    user_id = g.get("user_id")  # este debe ser UUID, string o UUID
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    # normalizamos actor a string UUID
+    actor_uuid = str(user_id)
+
+    async with get_conn_ctx() as conn:
+        # 1, validar que el actor es OWNER en ese taller
+        is_owner = await conn.fetchval(
+            """
+            SELECT EXISTS(
+              SELECT 1
+              FROM workshop_users
+              WHERE workshop_id = $1      -- int
+                AND user_id      = $2::uuid
+                AND user_type_id = $3
+            )
+            """,
+            workshop_id, actor_uuid, OWNER_ROLE_ID
+        )
+        if not is_owner:
+            return jsonify({"error": "Requiere rol OWNER en este taller"}), 403
+
+        # 2, no dejar al taller sin OWNER si el target es el único OWNER
+        owner_left = await conn.fetchval(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM workshop_users
+                WHERE workshop_id = $1 AND user_type_id = $2) = 1
+              AND EXISTS(
+                SELECT 1 FROM workshop_users
+                WHERE workshop_id = $1
+                  AND user_id = $3::uuid
+                  AND user_type_id = $2
+              )
+            """,
+            workshop_id, OWNER_ROLE_ID, str(member_user_id)
+        )
+        if owner_left:
+            return jsonify({"error": "No se puede quitar al único OWNER del taller"}), 400
+
+        # 3, transacción, borrar y loguear en forma atómica
+        async with conn.transaction():
+            deleted_row = await conn.fetchrow(
+                """
+                DELETE FROM workshop_users
+                WHERE workshop_id = $1
+                  AND user_id      = $2::uuid
+                RETURNING user_type_id
+                """,
+                workshop_id, str(member_user_id)
+            )
+            if not deleted_row:
+                return jsonify({"error": "Miembro no encontrado en este taller"}), 404
+
+            target_prev_role = deleted_row["user_type_id"]
+
+            meta = {
+                "ip": request.headers.get("X-Forwarded-For") or request.remote_addr,
+                "user_agent": request.headers.get("User-Agent"),
+                "reason": "owner_unassign_member"
+            }
+
+            await conn.execute(
+                """
+                INSERT INTO workshop_user_logs
+                  (workshop_id, actor_user_id, target_user_id, target_prev_role, action, meta)
+                VALUES ($1, $2::uuid, $3::uuid, $4, 'UNASSIGN', $5::jsonb)
+                """,
+                workshop_id, actor_uuid, str(member_user_id), target_prev_role, json.dumps(meta)
+            )
+
+    return jsonify({"ok": True}), 200
 
 
 @workshops_bp.route("/admin/<int:workshop_id>/members/<int:member_user_id>", methods=["DELETE"])
