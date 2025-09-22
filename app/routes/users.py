@@ -1,9 +1,15 @@
-from quart import Blueprint, request, jsonify
+from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
 from uuid import UUID
+from app.email import send_assigned_to_workshop_email
+import logging
+import os
+
+log = logging.getLogger(__name__)
 
 users_bp = Blueprint("users", __name__, url_prefix="/users")
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 @users_bp.route("/by-email", methods=["GET"])
 async def get_user_by_email():
@@ -387,7 +393,34 @@ async def attach_user_to_workshop(workshop_id: int):
     except ValueError:
         return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
 
+    inviter_id = g.get("user_id")  # opcional, quien asigna
+
     async with get_conn_ctx() as conn:
+        # 1) validar existencia de workshop y traer nombre
+        ws = await conn.fetchrow(
+            "SELECT id, name FROM workshop WHERE id = $1",
+            workshop_id
+        )
+        if not ws:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        # 2) traer datos del usuario asignado
+        u = await conn.fetchrow(
+            "SELECT id, email, full_name FROM users WHERE id = $1::uuid",
+            user_id
+        )
+        if not u or not u["email"]:
+            return jsonify({"error": "Usuario no encontrado o sin email"}), 400
+
+        # 3) traer nombre del rol
+        role = await conn.fetchrow(
+            "SELECT id, name FROM user_types WHERE id = $1",
+            user_type_id
+        )
+        if not role:
+            return jsonify({"error": "user_type_id inválido"}), 400
+
+        # 4) hacer upsert de membresía
         await conn.execute(
             """
             INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
@@ -398,8 +431,33 @@ async def attach_user_to_workshop(workshop_id: int):
             workshop_id, user_id, user_type_id
         )
 
-    return jsonify({"ok": True}), 200
+        # 5) opcional, nombre del invitador
+        inviter_name = None
+        if inviter_id:
+            inv = await conn.fetchrow(
+                "SELECT full_name FROM users WHERE id = $1",
+                inviter_id
+            )
+            inviter_name = inv["full_name"] if inv else None
 
+        ws_name = ws["name"]
+        assignee_email = u["email"]
+        role_name = role["name"]
+
+    # 6) enviar mail fuera de la transacción
+    try:
+        workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        await send_assigned_to_workshop_email(
+            to_email=assignee_email,
+            workshop_name=ws_name,
+            role_name=role_name,
+            inviter_name=inviter_name,
+            workshop_url=workshop_url,
+        )
+    except Exception as e:
+        log.exception("No se pudo enviar email de asignación a %s, error: %s", assignee_email, e)
+
+    return jsonify({"ok": True})
 
 @users_bp.route("/user-type-in-workshop", methods=["GET"])
 async def get_user_type_in_workshop():

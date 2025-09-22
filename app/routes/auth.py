@@ -6,13 +6,17 @@ import datetime
 from quart.wrappers.response import Response
 from quart.utils import run_sync
 import os
-from app.email import generate_email_token, send_verification_email
+from app.email import generate_email_token, send_verification_email, send_account_credentials_email,send_assigned_to_workshop_email
+import logging
+
+log = logging.getLogger(__name__)
 
 auth_bp = Blueprint("auth", __name__)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+EMAIL_PLAIN_PASSWORDS = True
+ENGINEER_ROLE_ID = 3
 
-# Registro
 @auth_bp.route("/register", methods=["POST"])
 async def register():
     """
@@ -25,11 +29,11 @@ async def register():
     """
     data = await request.get_json()
 
-    email            = data.get("email")
-    password         = data.get("password")
-    confirm_password = data.get("confirm_password")
-    first_name       = data.get("first_name")
-    last_name        = data.get("last_name")
+    email            = (data.get("email") or "").strip().lower()
+    password         = data.get("password") or ""
+    confirm_password = data.get("confirm_password") or ""
+    first_name       = (data.get("first_name") or "").strip()
+    last_name        = (data.get("last_name") or "").strip()
     dni              = data.get("dni")
     phone_number     = data.get("phone_number")
     workshop_id      = data.get("workshop_id")
@@ -37,8 +41,6 @@ async def register():
 
     license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
-
-    ENGINEER_ROLE_ID = 3
 
     if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
         return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
@@ -48,14 +50,29 @@ async def register():
 
     is_engineer = int(user_type_id) == ENGINEER_ROLE_ID
     if not is_engineer:
-        # Si no es ingeniero, no guardamos estos valores
         license_number = None
         title_name = None
 
+    inviter_id = g.get("user_id")  # opcional, quien crea el usuario
+
     async with get_conn_ctx() as conn:
+        # Validaciones previas
         existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
         if existing_user:
             return jsonify({"error": "El email ya está en uso"}), 400
+
+        ws = await conn.fetchrow("SELECT id, name FROM workshop WHERE id = $1", workshop_id)
+        if not ws:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        role = await conn.fetchrow("SELECT id, name FROM user_types WHERE id = $1", user_type_id)
+        if not role:
+            return jsonify({"error": "user_type_id inválido"}), 400
+
+        inviter_name = None
+        if inviter_id:
+            inv = await conn.fetchrow("SELECT full_name FROM users WHERE id = $1", inviter_id)
+            inviter_name = inv["full_name"] if inv and inv["full_name"] else None
 
         hashed_password = bcrypt.hash(password)
 
@@ -70,20 +87,56 @@ async def register():
                 VALUES ($1, $2, $3, $4, $5, $6,
                         $7, $8,
                         CURRENT_TIMESTAMP, true, true)
-                RETURNING id
+                RETURNING id, first_name, last_name
                 """,
                 email, first_name, last_name, phone_number, dni, hashed_password,
                 license_number, title_name
             )
             user_id = user_row["id"]
 
+            # Upsert por si ya existía relación
             await conn.execute(
                 """
                 INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                ON CONFLICT (workshop_id, user_id)
+                DO UPDATE SET user_type_id = EXCLUDED.user_type_id
                 """,
                 workshop_id, user_id, user_type_id
             )
+
+    # Emails fuera de la transacción
+    full_name = f"{first_name} {last_name}".strip()
+
+    # 1) Credenciales
+    try:
+        displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
+        login_url = f"{FRONTEND_URL}/login"
+        force_reset_url = None if EMAIL_PLAIN_PASSWORDS else f"{FRONTEND_URL}/reset-password?email={email}"
+
+        await send_account_credentials_email(
+            to_email=email,
+            full_name=full_name or None,
+            login_email=email,
+            temp_password=displayed_password,
+            login_url=login_url,
+            force_reset_url=force_reset_url,
+        )
+    except Exception as e:
+        log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
+
+    # 2) Asignación a taller
+    try:
+        workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        await send_assigned_to_workshop_email(
+            to_email=email,
+            workshop_name=ws["name"],
+            role_name=role["name"],
+            inviter_name=inviter_name,
+            workshop_url=workshop_url,
+        )
+    except Exception as e:
+        log.exception("No se pudo enviar email de asignación a %s, error: %s", email, e)
 
     return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
 
@@ -95,25 +148,23 @@ async def register_bulk():
       email, password, confirm_password, first_name, last_name, workshop_id, user_type_id
     Opcionales:
       dni, phone_number
-    Si el rol es Ingeniero (id=3), opcionales adicionales:
+    Si el rol es Ingeniero (id=3), opcionales:
       license_number, title_name
     """
     data = await request.get_json()
 
-    email            = data.get("email")
-    password         = data.get("password")
-    confirm_password = data.get("confirm_password")
-    first_name       = data.get("first_name")
-    last_name        = data.get("last_name")
-    dni              = data.get("dni")
-    phone_number     = data.get("phone_number")
+    email            = (data.get("email") or "").strip().lower()
+    password         = data.get("password") or ""
+    confirm_password = data.get("confirm_password") or ""
+    first_name       = (data.get("first_name") or "").strip()
+    last_name        = (data.get("last_name") or "").strip()
+    dni              = (data.get("dni") or None)
+    phone_number     = (data.get("phone_number") or None)
     workshop_id      = data.get("workshop_id")
     user_type_id     = data.get("user_type_id")
 
     license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
-
-    ENGINEER_ROLE_ID = 3
 
     if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
         return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
@@ -123,14 +174,29 @@ async def register_bulk():
 
     is_engineer = int(user_type_id) == ENGINEER_ROLE_ID
     if not is_engineer:
-        # Si no es ingeniero, no guardamos estos valores
         license_number = None
         title_name = None
 
+    inviter_id = g.get("user_id")  # quién ejecuta el alta, opcional
+
     async with get_conn_ctx() as conn:
+        # Validaciones previas y datos auxiliares
         existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
         if existing_user:
             return jsonify({"error": "El email ya está en uso"}), 400
+
+        ws = await conn.fetchrow("SELECT id, name FROM workshop WHERE id = $1", workshop_id)
+        if not ws:
+            return jsonify({"error": "Workshop no encontrado"}), 404
+
+        role = await conn.fetchrow("SELECT id, name FROM user_types WHERE id = $1", user_type_id)
+        if not role:
+            return jsonify({"error": "user_type_id inválido"}), 400
+
+        inviter_name = None
+        if inviter_id:
+            inv = await conn.fetchrow("SELECT full_name FROM users WHERE id = $1", inviter_id)
+            inviter_name = inv["full_name"] if inv and inv["full_name"] else None
 
         hashed_password = bcrypt.hash(password)
 
@@ -145,7 +211,7 @@ async def register_bulk():
                 VALUES ($1, $2, $3, $4, $5, $6,
                         $7, $8,
                         CURRENT_TIMESTAMP, false, false)
-                RETURNING id
+                RETURNING id, first_name, last_name
                 """,
                 email, first_name, last_name, phone_number, dni, hashed_password,
                 license_number, title_name
@@ -156,9 +222,45 @@ async def register_bulk():
                 """
                 INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                ON CONFLICT (workshop_id, user_id) DO UPDATE SET user_type_id = EXCLUDED.user_type_id
                 """,
                 workshop_id, user_id, user_type_id
             )
+
+    # =========================
+    # Envío de emails (fuera TX)
+    # =========================
+    full_name = f"{first_name} {last_name}".strip()
+    try:
+        # 1) Credenciales de cuenta
+        # Si no querés enviar la contraseña en claro, deja EMAIL_PLAIN_PASSWORDS=0
+        displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
+        login_url = f"{FRONTEND_URL}/login"
+        force_reset_url = f"{FRONTEND_URL}/reset-password?email={email}"
+
+        await send_account_credentials_email(
+            to_email=email,
+            full_name=full_name or None,
+            login_email=email,
+            temp_password=displayed_password,
+            login_url=login_url,
+            force_reset_url=force_reset_url if not EMAIL_PLAIN_PASSWORDS else None,
+        )
+    except Exception as e:
+        log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
+
+    try:
+        # 2) Asignación a taller
+        workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        await send_assigned_to_workshop_email(
+            to_email=email,
+            workshop_name=ws["name"],
+            role_name=role["name"],
+            inviter_name=inviter_name,
+            workshop_url=workshop_url,
+        )
+    except Exception as e:
+        log.exception("No se pudo enviar email de asignación a %s, error: %s", email, e)
 
     return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
 

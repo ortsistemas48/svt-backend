@@ -3,8 +3,15 @@ from app.db import get_conn_ctx
 from asyncpg.exceptions import UniqueViolationError
 from uuid import UUID
 import json
+from app.email import send_workshop_pending_email, send_workshop_approved_email
+import logging
+import os
+
+log = logging.getLogger(__name__)
 
 workshops_bp = Blueprint("workshops", __name__, url_prefix="/workshops")
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 OWNER_ROLE_ID = 2
 VALID_PROVINCES = {
@@ -44,12 +51,12 @@ async def create_workshop_unapproved():
     razon_social = (data.get("razonSocial") or "").strip()
     province = (data.get("province") or "").strip()
     city = (data.get("city") or "").strip()
-    address = (data.get("address") or "").strip() 
+    address = (data.get("address") or "").strip()
     phone = (data.get("phone") or "").strip()
     cuit = (data.get("cuit") or "").strip()
     plant_number_raw = data.get("plantNumber")
     disposition_number = (data.get("dispositionNumber") or "").strip()
-    
+
     if not disposition_number:
         return jsonify({"error": "Falta el número de disposición"}), 400
     if len(name) < 3:
@@ -72,10 +79,23 @@ async def create_workshop_unapproved():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # datos para mail
+    creator_email = None
+    creator_name = None
+
     async with get_conn_ctx() as conn:
         try:
             async with conn.transaction():
-                # detectar si la tabla workshop tiene columna address
+                # obtener email del creador
+                urow = await conn.fetchrow(
+                    "SELECT email, full_name FROM users WHERE id = $1",
+                    user_id,
+                )
+                if urow:
+                    creator_email = urow["email"]
+                    creator_name = urow["full_name"]
+
+                # detectar columnas
                 cols = await conn.fetch("""
                     SELECT column_name FROM information_schema.columns
                     WHERE table_name = 'workshop'
@@ -112,7 +132,7 @@ async def create_workshop_unapproved():
                     ws_id, user_id, OWNER_ROLE_ID
                 )
 
-                # inicializar steps y observaciones por defecto igual que tu create actual
+                # inicializar steps y observaciones por defecto
                 steps = await conn.fetch("SELECT id, name FROM steps ORDER BY id ASC")
                 if not steps:
                     raise RuntimeError("No hay pasos base en la tabla steps")
@@ -154,7 +174,20 @@ async def create_workshop_unapproved():
         except RuntimeError as e:
             return jsonify({"error": str(e)}), 500
 
-    # armar respuesta consistente
+    # enviar email fuera de la transacción, ya creado el workshop
+    if creator_email:
+        try:
+            review_url = f"{FRONTEND_URL}/select-workshop"
+            await send_workshop_pending_email(
+                to_email=creator_email,
+                workshop_name=name,
+                review_url=review_url,
+            )
+        except Exception as e:
+            # no rompemos la respuesta si falla el email, solo log
+            log.exception("No se pudo enviar email de taller pendiente a %s, error: %s", creator_email, e)
+
+    # respuesta
     out = {
         "id": row["id"],
         "name": row["name"],
@@ -183,20 +216,63 @@ async def create_workshop_unapproved():
     
 @workshops_bp.route("/<int:workshop_id>/approve", methods=["POST"])
 async def approve_workshop(workshop_id: int):
-    # acá podrías validar que g.user_id sea admin
+    # TODO: validar que g.user_id sea admin
     async with get_conn_ctx() as conn:
-        result = await conn.fetchrow(
-            """
-            UPDATE workshop
-            SET is_approved = true, updated_at = NOW()
-            WHERE id = $1
-            RETURNING id, is_approved
-            """,
-            workshop_id
-        )
-    if not result:
-        return jsonify({"error": "Workshop no encontrado"}), 404
-    return jsonify({"ok": True, "workshop_id": result["id"], "is_approved": result["is_approved"]}), 200
+        async with conn.transaction():
+            # 1) Traer datos actuales
+            ws = await conn.fetchrow(
+                """
+                SELECT id, name, is_approved
+                FROM workshop
+                WHERE id = $1
+                """,
+                workshop_id
+            )
+            if not ws:
+                return jsonify({"error": "Workshop no encontrado"}), 404
+
+            # 2) Si ya estaba aprobado, no reenviamos mails
+            if ws["is_approved"]:
+                return jsonify({"ok": True, "workshop_id": ws["id"], "is_approved": True, "already": True}), 200
+
+            # 3) Aprobar
+            await conn.execute(
+                """
+                UPDATE workshop
+                SET is_approved = true, updated_at = NOW()
+                WHERE id = $1
+                """,
+                workshop_id
+            )
+
+            # 4) Obtener emails de los OWNERS
+            owners = await conn.fetch(
+                """
+                SELECT u.email
+                FROM workshop_users wu
+                JOIN users u ON u.id = wu.user_id
+                WHERE wu.workshop_id = $1 AND wu.user_type_id = $2 AND COALESCE(u.email, '') <> ''
+                """,
+                workshop_id, OWNER_ROLE_ID
+            )
+            owner_emails = [r["email"] for r in owners]
+
+            ws_name = ws["name"]
+
+    # 5) Enviar mails fuera de la transacción
+    if owner_emails:
+        for em in owner_emails:
+            try:
+                panel_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+                await send_workshop_approved_email(
+                    to_email=em,
+                    workshop_name=ws_name,
+                    workshop_id=str(workshop_id),
+                )
+            except Exception as e:
+                log.exception("No se pudo enviar email de taller aprobado a %s, error: %s", em, e)
+
+    return jsonify({"ok": True, "workshop_id": workshop_id, "is_approved": True}), 200
 
 
 @workshops_bp.route("/pending", methods=["GET"])
