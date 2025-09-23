@@ -406,7 +406,7 @@ async def attach_user_to_workshop(workshop_id: int):
 
         # 2) traer datos del usuario asignado
         u = await conn.fetchrow(
-            "SELECT id, email, full_name FROM users WHERE id = $1::uuid",
+            "SELECT id, email, first_name, last_name FROM users WHERE id = $1::uuid",
             user_id
         )
         if not u or not u["email"]:
@@ -435,10 +435,11 @@ async def attach_user_to_workshop(workshop_id: int):
         inviter_name = None
         if inviter_id:
             inv = await conn.fetchrow(
-                "SELECT full_name FROM users WHERE id = $1",
+                "SELECT first_name, last_name FROM users WHERE id = $1",
                 inviter_id
             )
-            inviter_name = inv["full_name"] if inv else None
+            full_name = f'{inv["first_name"]} {inv["last_name"]}' if inv else None
+            inviter_name = full_name
 
         ws_name = ws["name"]
         assignee_email = u["email"]

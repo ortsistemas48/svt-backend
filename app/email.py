@@ -46,24 +46,39 @@ def _wrap_html(title: str, intro: str, cta_text: Optional[str] = None, cta_url: 
     """
 
 async def _send_email(to_email: str, subject: str, html: str):
+    if not RESEND_API_KEY:
+        log.error("RESEND_API_KEY no configurado, no se puede enviar email")
+        raise RuntimeError("Falta RESEND_API_KEY")
+    if not RESEND_FROM:
+        log.error("RESEND_FROM no configurado")
+        raise RuntimeError("Falta RESEND_FROM")
+
     payload = {
         "from": RESEND_FROM,
         "to": [to_email],
         "subject": subject,
         "html": html,
     }
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json=payload,
-        )
-        try:
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            # logueamos detalle para debug
-            log.exception("Error enviando email a %s: %s | body=%s", to_email, e, r.text)
-            raise
+    log.info("Enviando email a %s con subject='%s' desde '%s'", to_email, subject, RESEND_FROM)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json=payload,
+            )
+    except httpx.RequestError as e:
+        # errores de red, DNS, TLS, timeout
+        log.exception("Error de red enviando email a %s: %s", to_email, e)
+        raise
+
+    if r.status_code >= 400:
+        # log detallado del cuerpo para diagnosticar 401/422
+        log.error("Resend devolvió %s al enviar a %s. Body=%s", r.status_code, to_email, r.text)
+        r.raise_for_status()
+
+    log.info("Email enviado ok a %s. Respuesta=%s", to_email, r.text[:500])
     return True
 
 # =========================

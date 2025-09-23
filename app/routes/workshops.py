@@ -174,18 +174,22 @@ async def create_workshop_unapproved():
         except RuntimeError as e:
             return jsonify({"error": str(e)}), 500
 
-    # enviar email fuera de la transacción, ya creado el workshop
+    print('testing')
     if creator_email:
+        print('testing2', creator_email)
         try:
+            print('testing3')
             review_url = f"{FRONTEND_URL}/select-workshop"
-            await send_workshop_pending_email(
+            ok = await send_workshop_pending_email(
                 to_email=creator_email,
                 workshop_name=name,
                 review_url=review_url,
             )
+            print("Email de taller pendiente encolado para %s, ok=%s", creator_email, ok)
         except Exception as e:
-            # no rompemos la respuesta si falla el email, solo log
-            log.exception("No se pudo enviar email de taller pendiente a %s, error: %s", creator_email, e)
+            print("No se pudo enviar email de taller pendiente a %s, error: %s", creator_email, e)
+    else:
+        print("No se envió email, creator_email es None para user_id=%s", user_id)
 
     # respuesta
     out = {
