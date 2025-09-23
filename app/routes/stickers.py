@@ -90,6 +90,43 @@ async def list_available_orders():
     print(out)
     return jsonify(out), 200
 
+@stickers_bp.route("/orders", methods=["GET"])
+async def list_sticker_orders():
+    workshop_id = request.args.get("workshop_id", type=int)
+    if not workshop_id:
+        return jsonify({"error": "workshop_id requerido"}), 400
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+              so.id,
+              so.name,
+              so.status,
+              so.amount,
+              so.created_at,
+              COUNT(s.id) AS available_count
+            FROM sticker_orders so
+            LEFT JOIN stickers s ON s.sticker_order_id = so.id
+              AND lower(s.status) = 'disponible'
+              AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
+              AND NOT EXISTS (SELECT 1 FROM cars c WHERE c.sticker_id = s.id)
+            WHERE so.workshop_id = $1
+            GROUP BY so.id, so.name, so.status, so.amount, so.created_at
+            ORDER BY so.id DESC
+            """,
+            workshop_id,
+        )
+
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("created_at") is not None and hasattr(d["created_at"], "isoformat"):
+            d["created_at"] = d["created_at"].isoformat()
+        out.append(d)
+    return jsonify(out), 200
+
+
 
 @stickers_bp.route("/<int:sticker_id>", methods=["GET"])
 async def get_sticker(sticker_id: int):
@@ -215,6 +252,48 @@ async def mark_sticker_as_used(sticker_id: int):
         )
         
     return jsonify({"ok": True, "sticker_id": sticker_id, "status": "En Uso"}), 200
+
+
+@stickers_bp.route("/workshop/<int:workshop_id>", methods=["GET"])
+async def get_stickers_by_workshop(workshop_id: int):
+    """
+    Devuelve todas las obleas (stickers) de un taller específico.
+    Verifica que las obleas pertenezcan al taller a través de sticker_orders.
+    Parámetros:
+      - workshop_id: int (en la URL)
+    Respuesta:
+      - Lista de obleas con información completa
+    """
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+              s.id,
+              s.sticker_number,
+              s.expiration_date,
+              s.issued_at,
+              s.status,
+              s.sticker_order_id,
+              so.name as order_name,
+              so.workshop_id
+            FROM stickers s
+            JOIN sticker_orders so ON so.id = s.sticker_order_id
+            WHERE so.workshop_id = $1
+            ORDER BY s.id DESC
+            """,
+            workshop_id,
+        )
+
+    # Serializa fechas
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("expiration_date", "issued_at"):
+            if d.get(k) is not None and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        out.append(d)
+
+    return jsonify(out), 200
 
 
 @stickers_bp.route("/next-available", methods=["GET"])

@@ -88,12 +88,12 @@ async def create_workshop_unapproved():
             async with conn.transaction():
                 # obtener email del creador
                 urow = await conn.fetchrow(
-                    "SELECT email, full_name FROM users WHERE id = $1",
+                    "SELECT email, first_name, last_name FROM users WHERE id = $1",
                     user_id,
                 )
                 if urow:
                     creator_email = urow["email"]
-                    creator_name = urow["full_name"]
+                    creator_name = urow["first_name"] + " " + urow["last_name"]
 
                 # detectar columnas
                 cols = await conn.fetch("""
