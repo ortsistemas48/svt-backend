@@ -257,14 +257,45 @@ async def mark_sticker_as_used(sticker_id: int):
 @stickers_bp.route("/workshop/<int:workshop_id>", methods=["GET"])
 async def get_stickers_by_workshop(workshop_id: int):
     """
-    Devuelve todas las obleas (stickers) de un taller específico.
+    Devuelve todas las obleas (stickers) de un taller específico con paginación.
     Verifica que las obleas pertenezcan al taller a través de sticker_orders.
+    Incluye la patente del auto asignado (si existe).
     Parámetros:
       - workshop_id: int (en la URL)
+      - page: int (opcional, por defecto 1)
+      - per_page: int (opcional, por defecto 20, máximo 100)
     Respuesta:
-      - Lista de obleas con información completa
+      - Objeto con lista de obleas y metadatos de paginación
+      - license_plate: null si la oblea no está asignada a ningún auto
     """
+    # Obtener parámetros de paginación
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    
+    # Validar parámetros
+    if page < 1:
+        page = 1
+    if per_page < 1:
+        per_page = 20
+    if per_page > 100:
+        per_page = 100
+    
+    # Calcular offset
+    offset = (page - 1) * per_page
+
     async with get_conn_ctx() as conn:
+        # Obtener total de registros
+        total_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM stickers s
+            JOIN sticker_orders so ON so.id = s.sticker_order_id
+            WHERE so.workshop_id = $1
+            """,
+            workshop_id,
+        )
+        
+        # Obtener registros paginados
         rows = await conn.fetch(
             """
             SELECT
@@ -275,25 +306,47 @@ async def get_stickers_by_workshop(workshop_id: int):
               s.status,
               s.sticker_order_id,
               so.name as order_name,
-              so.workshop_id
+              so.workshop_id,
+              c.license_plate
             FROM stickers s
             JOIN sticker_orders so ON so.id = s.sticker_order_id
+            LEFT JOIN cars c ON c.sticker_id = s.id
             WHERE so.workshop_id = $1
             ORDER BY s.id DESC
+            LIMIT $2 OFFSET $3
             """,
-            workshop_id,
+            workshop_id, per_page, offset,
         )
 
     # Serializa fechas
-    out = []
+    stickers = []
     for r in rows:
         d = dict(r)
         for k in ("expiration_date", "issued_at"):
             if d.get(k) is not None and hasattr(d[k], "isoformat"):
                 d[k] = d[k].isoformat()
-        out.append(d)
+        stickers.append(d)
 
-    return jsonify(out), 200
+    # Calcular metadatos de paginación
+    total_pages = (total_count + per_page - 1) // per_page
+    has_next = page < total_pages
+    has_prev = page > 1
+
+    response = {
+        "stickers": stickers,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total_count,
+            "total_pages": total_pages,
+            "has_next": has_next,
+            "has_prev": has_prev,
+            "next_page": page + 1 if has_next else None,
+            "prev_page": page - 1 if has_prev else None
+        }
+    }
+
+    return jsonify(response), 200
 
 
 @stickers_bp.route("/next-available", methods=["GET"])

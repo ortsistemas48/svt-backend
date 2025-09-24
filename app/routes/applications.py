@@ -401,6 +401,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
         return jsonify({"error": "Parámetros inválidos"}), 400
 
     q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
     status_in_raw = (request.args.get("status_in") or "").strip()
     status_list = [s.strip() for s in status_in_raw.split(",") if s.strip()]
     offset = (page - 1) * per_page
@@ -415,6 +416,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
     if q:
         filters.append("""
             (
+                a.id::text ILIKE $2 OR
+                c.model ILIKE $2 OR
                 c.license_plate ILIKE $2 OR
                 o.first_name     ILIKE $2 OR
                 o.last_name      ILIKE $2 OR
@@ -423,7 +426,12 @@ async def list_full_applications_by_workshop(workshop_id: int):
         """)
         params.append(f"%{q}%")
 
-    if status_list:
+    # Filtro por status específico (tiene prioridad sobre status_in)
+    if status:
+        filters.append(f"a.status = ${len(params)+1}")
+        params.append(status)
+    elif status_list:
+        # Solo usar status_in si no se especifica status
         filters.append(f"a.status = ANY(${len(params)+1}::text[])")
         params.append(status_list)
 
@@ -529,7 +537,12 @@ async def list_full_applications_by_workshop(workshop_id: int):
         "items": items,
         "total": total,
         "page": page,
-        "per_page": per_page
+        "per_page": per_page,
+        "filters": {
+            "q": q,
+            "status": status,
+            "status_in": status_list
+        }
     }), 200
 
 
@@ -615,7 +628,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                     "car": dict(car) if car else None,
                 }
             )
-
+    print("result", len(result))
     return jsonify(result), 200
 
 
