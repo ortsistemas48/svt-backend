@@ -149,7 +149,7 @@ async def add_or_update_car(app_id):
 
         async with conn.transaction():
             row = await conn.fetchrow("""
-                SELECT owner_id, driver_id
+                SELECT owner_id, driver_id, car_id
                 FROM applications
                 WHERE id = $1
                 FOR UPDATE
@@ -160,9 +160,17 @@ async def add_or_update_car(app_id):
 
             owner_id = row["owner_id"]
             driver_id = row["driver_id"]
+            old_car_id = row["car_id"]
 
             if not license_plate:
                 return jsonify({"error": "Falta license_plate"}), 400
+
+            # Obtener el sticker_id actual del car (si existe) - este será el "old sticker"
+            old_sticker_id = None
+            if old_car_id:
+                old_sticker_id = await conn.fetchval(
+                    "SELECT sticker_id FROM cars WHERE id = $1", old_car_id
+                )
 
             car_id = await conn.fetchval("""
                 INSERT INTO cars (
@@ -219,6 +227,21 @@ async def add_or_update_car(app_id):
                 SET car_id = $1
                 WHERE id = $2
             """, car_id, app_id)
+
+            # Actualizar estados de stickers
+            # 1. Liberar el sticker anterior (si existe) - ponerlo como Disponible
+            if old_sticker_id:
+                await conn.execute(
+                    "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                    old_sticker_id
+                )
+
+            # 2. Marcar el nuevo sticker (del request) como En Uso
+            if sticker_id:
+                await conn.execute(
+                    "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
+                    sticker_id
+                )
             
     return jsonify({"message": "Vehículo vinculado a la aplicación", "car_id": car_id}), 200
 
@@ -571,65 +594,253 @@ async def enqueue_application(app_id):
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
 async def list_completed_applications_by_workshop(workshop_id: int):
     """
-    Devuelve las applications del workshop con status = 'Completado',
+    Devuelve las applications del workshop con status = 'Completado' con paginación y filtros,
     incluyendo owner, driver y car cuando existan.
+    Parámetros:
+      - workshop_id: int (en la URL)
+      - page: int (opcional, por defecto 1)
+      - per_page: int (opcional, por defecto 20, máximo 100)
+      - application_id: int (filtrar por ID de aplicación)
+      - license_plate: str (filtrar por patente del auto)
+      - car_model: str (filtrar por modelo del auto)
+      - owner_fullname: str (filtrar por nombre completo del propietario)
+      - owner_dni: str (filtrar por DNI del propietario)
+      - result: str (filtrar por resultado de la aplicación)
+      - q: str (búsqueda general en patente, nombre, apellido, DNI, resultado)
+    Respuesta:
+      - Objeto con lista de applications y metadatos de paginación
     """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
+    # Obtener parámetros de paginación
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 20, type=int)
+    
+    # Validar parámetros de paginación
+    if page < 1:
+        page = 1
+    if per_page < 1:
+        per_page = 20
+    if per_page > 100:
+        per_page = 100
+    
+    # Obtener parámetros de filtrado
+    application_id = request.args.get("application_id", type=int)
+    license_plate = (request.args.get("license_plate") or "").strip()
+    car_model = (request.args.get("car_model") or "").strip()
+    owner_fullname = (request.args.get("owner_fullname") or "").strip()
+    owner_dni = (request.args.get("owner_dni") or "").strip()
+    result = (request.args.get("result") or "").strip()
+    q = (request.args.get("q") or "").strip()
+    
+    # Calcular offset
+    offset = (page - 1) * per_page
+
+    # --- Filtros dinámicos ---
+    filters = [
+        "a.workshop_id = $1",
+        "a.status = 'Completado'",
+        "a.is_deleted IS NOT TRUE"
+    ]
+    params = [workshop_id]
+    param_count = 1
+
+    # Filtro por application_id
+    if application_id:
+        param_count += 1
+        filters.append(f"a.id = ${param_count}")
+        params.append(application_id)
+
+    # Filtro por license_plate
+    if license_plate:
+        param_count += 1
+        filters.append(f"c.license_plate ILIKE ${param_count}")
+        params.append(f"%{license_plate}%")
+
+    # Filtro por car_model
+    if car_model:
+        param_count += 1
+        filters.append(f"c.model ILIKE ${param_count}")
+        params.append(f"%{car_model}%")
+
+    # Filtro por owner_fullname (busca en first_name, last_name y nombre completo)
+    if owner_fullname:
+        param_count += 1
+        filters.append(f"""
+            (
+                o.first_name ILIKE ${param_count} OR
+                o.last_name ILIKE ${param_count} OR
+                CONCAT(o.first_name, ' ', o.last_name) ILIKE ${param_count}
+            )
+        """)
+        params.append(f"%{owner_fullname}%")
+
+    # Filtro por owner_dni
+    if owner_dni:
+        param_count += 1
+        filters.append(f"o.dni::text ILIKE ${param_count}")
+        params.append(f"%{owner_dni}%")
+
+    # Filtro por result
+    if result:
+        param_count += 1
+        filters.append(f"a.result ILIKE ${param_count}")
+        params.append(f"%{result}%")
+
+    # Búsqueda general (q)
+    if q:
+        param_count += 1
+        filters.append(f"""
+            (
+                a.id::text ILIKE ${param_count} OR
+                c.model ILIKE ${param_count} OR
+                c.license_plate ILIKE ${param_count} OR
+                o.first_name     ILIKE ${param_count} OR
+                o.last_name      ILIKE ${param_count} OR
+                o.dni::text      ILIKE ${param_count} OR
+                a.result         ILIKE ${param_count}
+            )
+        """)
+        params.append(f"%{q}%")
+
+    # Filtro para asegurar que hay datos de car o owner
+    filters.append("""
+        (
+            ( NULLIF(trim(c.license_plate), '') IS NOT NULL
+              OR NULLIF(trim(c.brand), '')         IS NOT NULL
+              OR NULLIF(trim(c.model), '')         IS NOT NULL )
+        )
+        OR
+        (
+            ( NULLIF(trim(o.first_name), '') IS NOT NULL
+              OR NULLIF(trim(o.last_name), '')  IS NOT NULL
+              OR o.dni IS NOT NULL )
+        )
+    """)
+
+    where_sql = " AND ".join(f"({f.strip()})" for f in filters)
+
     async with get_conn_ctx() as conn:
-        # 1) Traer solo las applications completadas
-        applications = await conn.fetch(
-            """
-            SELECT id, user_id, owner_id, driver_id, car_id, date, status, result
-            FROM applications
-            WHERE workshop_id = $1
-              AND status = 'Completado'
-            ORDER BY date DESC
+        # Obtener total de registros
+        total_count = await conn.fetchval(
+            f"""
+            SELECT COUNT(*)
+            FROM applications a
+            LEFT JOIN persons o ON a.owner_id = o.id
+            LEFT JOIN cars    c ON a.car_id   = c.id
+            WHERE {where_sql}
             """,
-            workshop_id,
+            *params
+        )
+        
+        # Obtener registros paginados
+        limit_idx = len(params) + 1
+        offset_idx = len(params) + 2
+        
+        applications = await conn.fetch(
+            f"""
+            SELECT
+                a.id,
+                a.user_id,
+                a.owner_id,
+                a.driver_id,
+                a.car_id,
+                a.date,
+                a.status,
+                a.result,
+                o.first_name  AS owner_first_name,
+                o.last_name   AS owner_last_name,
+                o.dni         AS owner_dni,
+                d.first_name  AS driver_first_name,
+                d.last_name   AS driver_last_name,
+                d.dni         AS driver_dni,
+                c.license_plate,
+                c.brand,
+                c.model
+            FROM applications a
+            LEFT JOIN persons o ON a.owner_id = o.id
+            LEFT JOIN persons d ON a.driver_id = d.id
+            LEFT JOIN cars    c ON a.car_id   = c.id
+            WHERE {where_sql}
+            ORDER BY a.date DESC NULLS LAST
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+            """,
+            *params, per_page, offset
         )
 
-        # 2) Enriquecer con owner/driver/car (mismo patrón que el endpoint full)
+        # Procesar resultados (usando la misma estructura que el endpoint full)
         result = []
+        for r in applications:
+            result.append({
+                "application_id": r["id"],
+                "user_id": r["user_id"],
+                "date": r["date"].isoformat() if r["date"] else None,
+                "status": r["status"],
+                "result": r.get("result"),
+                "owner": (
+                    {
+                        "first_name": r["owner_first_name"],
+                        "last_name":  r["owner_last_name"],
+                        "dni":        r["owner_dni"],
+                    }
+                    if (r["owner_first_name"] or r["owner_last_name"] or r["owner_dni"] is not None)
+                    else None
+                ),
+                "driver": (
+                    {
+                        "first_name": r["driver_first_name"],
+                        "last_name":  r["driver_last_name"],
+                        "dni":        r["driver_dni"],
+                    }
+                    if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
+                    else None
+                ),
+                "car": (
+                    {
+                        "license_plate": r["license_plate"],
+                        "brand":         r["brand"],
+                        "model":         r["model"],
+                    }
+                    if (
+                        (r["license_plate"] and r["license_plate"].strip())
+                        or (r["brand"] and r["brand"].strip())
+                        or (r["model"] and r["model"].strip())
+                    )
+                    else None
+                ),
+            })
 
-        for app in applications:
-            owner = None
-            driver = None
-            car = None
+    # Calcular metadatos de paginación
+    total_pages = (total_count + per_page - 1) // per_page
+    has_next = page < total_pages
+    has_prev = page > 1
 
-            if app["owner_id"]:
-                owner = await conn.fetchrow(
-                    "SELECT * FROM persons WHERE id = $1", app["owner_id"]
-                )
-            if app["driver_id"]:
-                driver = await conn.fetchrow(
-                    "SELECT * FROM persons WHERE id = $1", app["driver_id"]
-                )
-            if app["car_id"]:
-                car = await conn.fetchrow(
-                    "SELECT * FROM cars WHERE id = $1", app["car_id"]
-                )
+    response = {
+        "applications": result,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total_count,
+            "total_pages": total_pages,
+            "has_next": has_next,
+            "has_prev": has_prev,
+            "next_page": page + 1 if has_next else None,
+            "prev_page": page - 1 if has_prev else None
+        },
+        "filters": {
+            "application_id": application_id,
+            "license_plate": license_plate,
+            "car_model": car_model,
+            "owner_fullname": owner_fullname,
+            "owner_dni": owner_dni,
+            "result": result,
+            "q": q
+        }
+    }
 
-            # Estructura compatible con el front actual
-            result.append(
-                {
-                    "application_id": app["id"],
-                    "user_id": app["user_id"],
-                    "date": app["date"].isoformat() if app["date"] else None,
-                    "status": app.get("status"),   # mismo uso que tu endpoint full
-                    "result": app.get("result"),
-                    # Si más adelante agregás una columna "result" en applications,
-                    # esta línea la podés habilitar:
-                    # "result": app.get("result"),
-                    "owner": dict(owner) if owner else None,
-                    "driver": dict(driver) if driver else None,
-                    "car": dict(car) if car else None,
-                }
-            )
-    print("result", len(result))
-    return jsonify(result), 200
+    return jsonify(response), 200
 
 
 @applications_bp.route("/<int:app_id>/soft-delete", methods=["POST"])
