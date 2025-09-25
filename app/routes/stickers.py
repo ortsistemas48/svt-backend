@@ -90,6 +90,40 @@ async def list_available_orders():
     print(out)
     return jsonify(out), 200
 
+
+@stickers_bp.route("/list-orders", methods=["GET"])
+async def list_orders():
+    workshop_id = request.args.get("workshop_id", type=int)
+    if not workshop_id:
+        return jsonify({"error": "workshop_id requerido"}), 400
+
+    sql = """
+    WITH counts AS (
+      SELECT
+        so.id,
+        COUNT(s.id) FILTER (WHERE c.id IS NULL) AS available_count
+      FROM sticker_orders so
+      LEFT JOIN stickers s ON s.sticker_order_id = so.id
+      LEFT JOIN cars c     ON c.sticker_id = s.id
+      WHERE so.workshop_id = $1
+      GROUP BY so.id
+    )
+    SELECT
+      so.*,
+      COALESCE(counts.available_count, 0) AS available_count
+    FROM sticker_orders so
+    LEFT JOIN counts ON counts.id = so.id
+    WHERE so.workshop_id = $1
+    ORDER BY so.id DESC
+    """
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(sql, workshop_id)
+
+    out = [dict(r) for r in rows]
+    return jsonify(out), 200
+
+
 @stickers_bp.route("/orders", methods=["GET"])
 async def list_sticker_orders():
     workshop_id = request.args.get("workshop_id", type=int)
