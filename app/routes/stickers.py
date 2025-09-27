@@ -383,6 +383,41 @@ async def get_stickers_by_workshop(workshop_id: int):
     return jsonify(response), 200
 
 
+# stickers_bp.py
+
+@stickers_bp.route("/<int:sticker_id>/status", methods=["PATCH"])
+async def set_sticker_status(sticker_id: int):
+    data = await request.get_json(silent=True) or {}
+    raw = str(data.get("status", "")).strip().lower()
+
+    #por las dudas esto
+    norm_map = {
+        "disponible": "Disponible",
+        "no disponible": "No Disponible",
+        "nodisponible": "No Disponible",
+        "en uso": "En Uso",
+        "enuso": "En Uso",
+    }
+    status = norm_map.get(raw)
+    if status is None:
+        return jsonify({
+            "error": "status inválido",
+            "allowed": ["Disponible", "No Disponible", "En Uso"]
+        }), 400
+
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            "UPDATE stickers SET status = $1 WHERE id = $2 RETURNING id, status",
+            status, sticker_id
+        )
+
+    if not row:
+        return jsonify({"error": "sticker no encontrado"}), 404
+
+    return jsonify({"ok": True, "sticker_id": row["id"], "status": row["status"]}), 200
+
+
+
 @stickers_bp.route("/next-available", methods=["GET"])
 async def get_next_available_sticker():
     """
