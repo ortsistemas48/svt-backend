@@ -33,7 +33,8 @@ async def get_user_by_email():
                 u.phone_number,
                 u.title_name,
                 u.license_number,
-                wu.user_type_id
+                wu.engineer_kind,
+                NULL::int AS user_type_id   -- compat: ya no está en workshop_users
             FROM users u
             LEFT JOIN workshop_users wu
               ON wu.user_id = u.id
@@ -44,8 +45,6 @@ async def get_user_by_email():
             email, workshop_id
         )
 
-    # Si el usuario existe pero no está asociado a ese workshop,
-    # user_type_id vendrá como null.
     return jsonify(dict(row) if row else None)
 
 
@@ -380,11 +379,22 @@ async def list_user_types():
 
 @users_bp.route("/assign/<int:workshop_id>", methods=["POST"])
 async def attach_user_to_workshop(workshop_id: int):
-    data = await request.get_json()
-    user_id = data.get("user_id")          # UUID string
-    user_type_id = data.get("user_type_id")
+    """
+    Asigna (o actualiza) un usuario a un taller con un rol dado.
+    Si el rol es Ingeniero (id=3), requiere:
+      - engineer_kind: "Titular" | "Suplente"
+    Regla de negocio: a lo sumo 1 Ingeniero Titular por taller.
+    """
+    try:
+        data = await request.get_json(force=True, silent=False)
+    except Exception:
+        return jsonify({"error": "Body JSON inválido"}), 400
 
-    if not user_id or not user_type_id:
+    user_id = (data or {}).get("user_id")            # UUID string
+    user_type_id = (data or {}).get("user_type_id")  # int
+    engineer_kind = (data or {}).get("engineer_kind")  # "Titular" | "Suplente" | None
+
+    if not user_id or user_type_id is None:
         return jsonify({"error": "user_id y user_type_id son requeridos"}), 400
 
     # valida UUID
@@ -393,10 +403,23 @@ async def attach_user_to_workshop(workshop_id: int):
     except ValueError:
         return jsonify({"error": "user_id inválido, debe ser UUID"}), 400
 
-    inviter_id = g.get("user_id")  # opcional, quien asigna
+    # valida tipo de rol
+    try:
+        user_type_id = int(user_type_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "user_type_id debe ser numérico"}), 400
+
+    ENGINEER_ROLE_ID = 3
+    if user_type_id == ENGINEER_ROLE_ID:
+        if isinstance(engineer_kind, str):
+            engineer_kind = engineer_kind.strip()
+        if engineer_kind not in ("Titular", "Suplente"):
+            return jsonify({"error": "engineer_kind debe ser 'Titular' o 'Suplente'"}), 400
+
+    inviter_id = g.get("user_id")  # opcional, quién asigna
 
     async with get_conn_ctx() as conn:
-        # 1) validar existencia de workshop y traer nombre
+        # 1) validar workshop
         ws = await conn.fetchrow(
             "SELECT id, name FROM workshop WHERE id = $1",
             workshop_id
@@ -404,7 +427,7 @@ async def attach_user_to_workshop(workshop_id: int):
         if not ws:
             return jsonify({"error": "Workshop no encontrado"}), 404
 
-        # 2) traer datos del usuario asignado
+        # 2) usuario
         u = await conn.fetchrow(
             "SELECT id, email, first_name, last_name FROM users WHERE id = $1::uuid",
             user_id
@@ -412,7 +435,7 @@ async def attach_user_to_workshop(workshop_id: int):
         if not u or not u["email"]:
             return jsonify({"error": "Usuario no encontrado o sin email"}), 400
 
-        # 3) traer nombre del rol
+        # 3) rol
         role = await conn.fetchrow(
             "SELECT id, name FROM user_types WHERE id = $1",
             user_type_id
@@ -420,38 +443,72 @@ async def attach_user_to_workshop(workshop_id: int):
         if not role:
             return jsonify({"error": "user_type_id inválido"}), 400
 
-        # 4) hacer upsert de membresía
-        await conn.execute(
-            """
-            INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
-            VALUES ($1, $2::uuid, $3)
-            ON CONFLICT (workshop_id, user_id)
-            DO UPDATE SET user_type_id = EXCLUDED.user_type_id
-            """,
-            workshop_id, user_id, user_type_id
-        )
+        # 3.1) Si es Ingeniero Titular, validar unicidad por taller
+        if user_type_id == ENGINEER_ROLE_ID and engineer_kind == "Titular":
+            exists_titular = await conn.fetchval(
+                """
+                SELECT 1
+                  FROM workshop_users
+                 WHERE workshop_id = $1
+                   AND user_type_id = $2
+                   AND engineer_kind = 'Titular'
+                   AND user_id <> $3::uuid
+                 LIMIT 1
+                """,
+                workshop_id, ENGINEER_ROLE_ID, user_id
+            )
+            if exists_titular:
+                return jsonify({"error": "Ya existe un Ingeniero Titular asignado a este taller"}), 409
 
-        # 5) opcional, nombre del invitador
+        # 4) upsert de membresía
+        # Tabla workshop_users: (workshop_id int, user_id uuid, user_type_id int, engineer_kind text NULL)
+        if user_type_id == ENGINEER_ROLE_ID:
+            await conn.execute(
+                """
+                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, engineer_kind)
+                VALUES ($1, $2::uuid, $3, $4)
+                ON CONFLICT (workshop_id, user_id)
+                DO UPDATE SET
+                    user_type_id  = EXCLUDED.user_type_id,
+                    engineer_kind = EXCLUDED.engineer_kind
+                """,
+                workshop_id, user_id, user_type_id, engineer_kind
+            )
+        else:
+            # Para roles no-ingeniero, limpiamos engineer_kind
+            await conn.execute(
+                """
+                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, engineer_kind)
+                VALUES ($1, $2::uuid, $3, NULL)
+                ON CONFLICT (workshop_id, user_id)
+                DO UPDATE SET
+                    user_type_id  = EXCLUDED.user_type_id,
+                    engineer_kind = NULL
+                """,
+                workshop_id, user_id, user_type_id
+            )
+
+        # 5) nombre del invitador (opcional)
         inviter_name = None
         if inviter_id:
             inv = await conn.fetchrow(
                 "SELECT first_name, last_name FROM users WHERE id = $1",
                 inviter_id
             )
-            full_name = f'{inv["first_name"]} {inv["last_name"]}' if inv else None
-            inviter_name = full_name
+            inviter_name = f'{inv["first_name"]} {inv["last_name"]}'.strip() if inv else None
 
         ws_name = ws["name"]
         assignee_email = u["email"]
         role_name = role["name"]
 
-    # 6) enviar mail fuera de la transacción
+    # 6) email fuera de la transacción
     try:
         workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        extra_role = f" ({engineer_kind})" if (user_type_id == ENGINEER_ROLE_ID and engineer_kind) else ""
         await send_assigned_to_workshop_email(
             to_email=assignee_email,
             workshop_name=ws_name,
-            role_name=role_name,
+            role_name=f"{role_name}{extra_role}",
             inviter_name=inviter_name,
             workshop_url=workshop_url,
         )
@@ -459,6 +516,7 @@ async def attach_user_to_workshop(workshop_id: int):
         log.exception("No se pudo enviar email de asignación a %s, error: %s", assignee_email, e)
 
     return jsonify({"ok": True})
+
 
 @users_bp.route("/user-type-in-workshop", methods=["GET"])
 async def get_user_type_in_workshop():

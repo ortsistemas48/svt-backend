@@ -24,8 +24,8 @@ async def register():
       email, password, confirm_password, first_name, last_name, workshop_id, user_type_id
     Opcionales:
       dni, phone_number
-    Si el rol es Ingeniero (id=3), opcionales adicionales:
-      license_number, title_name
+    Si el rol es Ingeniero (id=3), opcionales/adicionales:
+      license_number, title_name, engineer_kind ("Titular" | "Suplente")
     """
     data = await request.get_json()
 
@@ -37,10 +37,11 @@ async def register():
     dni              = data.get("dni")
     phone_number     = data.get("phone_number")
     workshop_id      = data.get("workshop_id")
-    user_type_id     = data.get("user_type_id")
+    user_type_id     = data.get("user_type_id")  # se usa sólo para saber si es ingeniero
 
     license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
+    engineer_kind  = data.get("engineer_kind")  # "Titular" | "Suplente" (solo ing)
 
     if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
         return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
@@ -52,6 +53,13 @@ async def register():
     if not is_engineer:
         license_number = None
         title_name = None
+        engineer_kind = None
+    else:
+        # Validaciones de ingeniero
+        if not license_number or not title_name:
+            return jsonify({"error": "Para Ingeniero, completá matrícula y título"}), 400
+        if engineer_kind not in ("Titular", "Suplente"):
+            return jsonify({"error": "Elegí si el ingeniero es Titular o Suplente"}), 400
 
     inviter_id = g.get("user_id")  # opcional, quien crea el usuario
 
@@ -65,14 +73,17 @@ async def register():
         if not ws:
             return jsonify({"error": "Workshop no encontrado"}), 404
 
-        role = await conn.fetchrow("SELECT id, name FROM user_types WHERE id = $1", user_type_id)
-        if not role:
-            return jsonify({"error": "user_type_id inválido"}), 400
-
+        # nombre del invitador
         inviter_name = None
         if inviter_id:
-            inv = await conn.fetchrow("SELECT full_name FROM users WHERE id = $1", inviter_id)
-            inviter_name = inv["full_name"] if inv and inv["full_name"] else None
+            inv = await conn.fetchrow(
+                "SELECT first_name, last_name FROM users WHERE id = $1",
+                inviter_id
+            )
+            if inv:
+                fn = (inv.get("first_name") or "").strip()
+                ln = (inv.get("last_name") or "").strip()
+                inviter_name = (" ".join([x for x in (fn, ln) if x])).strip() or None
 
         hashed_password = bcrypt.hash(password)
 
@@ -94,15 +105,15 @@ async def register():
             )
             user_id = user_row["id"]
 
-            # Upsert por si ya existía relación
+            # Relación workshop_users SIN user_type_id, sólo engineer_kind
             await conn.execute(
                 """
-                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
+                INSERT INTO workshop_users (workshop_id, user_id, engineer_kind, created_at)
                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
                 ON CONFLICT (workshop_id, user_id)
-                DO UPDATE SET user_type_id = EXCLUDED.user_type_id
+                DO UPDATE SET engineer_kind = EXCLUDED.engineer_kind
                 """,
-                workshop_id, user_id, user_type_id
+                workshop_id, user_id, engineer_kind
             )
 
     # Emails fuera de la transacción
@@ -125,13 +136,16 @@ async def register():
     except Exception as e:
         log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
 
-    # 2) Asignación a taller
+    # 2) Asignación a taller (rol descriptivo derivado)
     try:
         workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        role_name = None
+        if is_engineer:
+            role_name = f"Ingeniero {engineer_kind}"
         await send_assigned_to_workshop_email(
             to_email=email,
             workshop_name=ws["name"],
-            role_name=role["name"],
+            role_name=role_name,
             inviter_name=inviter_name,
             workshop_url=workshop_url,
         )
@@ -148,8 +162,8 @@ async def register_bulk():
       email, password, confirm_password, first_name, last_name, workshop_id, user_type_id
     Opcionales:
       dni, phone_number
-    Si el rol es Ingeniero (id=3), opcionales:
-      license_number, title_name
+    Si el rol es Ingeniero (id=3), adicionales:
+      license_number, title_name, engineer_kind ("Titular" | "Suplente")
     """
     data = await request.get_json()
 
@@ -161,10 +175,11 @@ async def register_bulk():
     dni              = (data.get("dni") or None)
     phone_number     = (data.get("phone_number") or None)
     workshop_id      = data.get("workshop_id")
-    user_type_id     = data.get("user_type_id")
+    user_type_id     = data.get("user_type_id")  # se usa sólo para saber si es ingeniero
 
     license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
+    engineer_kind  = data.get("engineer_kind")
 
     if not all([email, password, confirm_password, first_name, last_name, workshop_id, user_type_id]):
         return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
@@ -176,6 +191,12 @@ async def register_bulk():
     if not is_engineer:
         license_number = None
         title_name = None
+        engineer_kind = None
+    else:
+        if not license_number or not title_name:
+            return jsonify({"error": "Para Ingeniero, completá matrícula y título"}), 400
+        if engineer_kind not in ("Titular", "Suplente"):
+            return jsonify({"error": "Elegí si el ingeniero es Titular o Suplente"}), 400
 
     inviter_id = g.get("user_id")  # quién ejecuta el alta, opcional
 
@@ -189,14 +210,17 @@ async def register_bulk():
         if not ws:
             return jsonify({"error": "Workshop no encontrado"}), 404
 
-        role = await conn.fetchrow("SELECT id, name FROM user_types WHERE id = $1", user_type_id)
-        if not role:
-            return jsonify({"error": "user_type_id inválido"}), 400
-
+        # nombre del invitador
         inviter_name = None
         if inviter_id:
-            inv = await conn.fetchrow("SELECT full_name FROM users WHERE id = $1", inviter_id)
-            inviter_name = inv["full_name"] if inv and inv["full_name"] else None
+            inv = await conn.fetchrow(
+                "SELECT first_name, last_name FROM users WHERE id = $1",
+                inviter_id
+            )
+            if inv:
+                fn = (inv.get("first_name") or "").strip()
+                ln = (inv.get("last_name") or "").strip()
+                inviter_name = (" ".join([x for x in (fn, ln) if x])).strip() or None
 
         hashed_password = bcrypt.hash(password)
 
@@ -218,13 +242,14 @@ async def register_bulk():
             )
             user_id = user_row["id"]
 
+            # Relación workshop_users SIN user_type_id
             await conn.execute(
                 """
-                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, created_at)
+                INSERT INTO workshop_users (workshop_id, user_id, engineer_kind, created_at)
                 VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-                ON CONFLICT (workshop_id, user_id) DO UPDATE SET user_type_id = EXCLUDED.user_type_id
+                ON CONFLICT (workshop_id, user_id) DO UPDATE SET engineer_kind = EXCLUDED.engineer_kind
                 """,
-                workshop_id, user_id, user_type_id
+                workshop_id, user_id, engineer_kind
             )
 
     # =========================
@@ -233,7 +258,6 @@ async def register_bulk():
     full_name = f"{first_name} {last_name}".strip()
     try:
         # 1) Credenciales de cuenta
-        # Si no querés enviar la contraseña en claro, deja EMAIL_PLAIN_PASSWORDS=0
         displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
         login_url = f"{FRONTEND_URL}/login"
         force_reset_url = f"{FRONTEND_URL}/reset-password?email={email}"
@@ -250,12 +274,13 @@ async def register_bulk():
         log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
 
     try:
-        # 2) Asignación a taller
+        # 2) Asignación a taller (rol descriptivo derivado)
         workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
+        role_name = f"Ingeniero {engineer_kind}" if is_engineer else None
         await send_assigned_to_workshop_email(
             to_email=email,
             workshop_name=ws["name"],
-            role_name=role["name"],
+            role_name=role_name,
             inviter_name=inviter_name,
             workshop_url=workshop_url,
         )
@@ -263,72 +288,6 @@ async def register_bulk():
         log.exception("No se pudo enviar email de asignación a %s, error: %s", email, e)
 
     return jsonify({"message": "Usuario registrado correctamente", "user_id": str(user_id)}), 201
-
-
-@auth_bp.route("/owner/register", methods=["POST"])
-async def register_user():
-    data = await request.get_json()
-
-    email = data.get("email")
-    password = data.get("password")
-    confirm_password = data.get("confirm_password")
-    first_name = data.get("first_name")
-    last_name = data.get("last_name")
-    dni = data.get("dni")
-    phone_number = data.get("phone_number")
-
-    # Validaciones mínimas
-    if not all([email, password, confirm_password, first_name, last_name]):
-        return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
-
-    if password != confirm_password:
-        return jsonify({"error": "Las contraseñas no coinciden"}), 400
-
-    async with get_conn_ctx() as conn:
-
-        existing_user = await conn.fetchrow(
-            "SELECT 1 FROM users WHERE email = $1",
-            email
-        )
-        if existing_user:
-            return jsonify({"error": "El email ya está en uso"}), 400
-
-        hashed_password = bcrypt.hash(password)
-        token = generate_email_token()
-        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-
-        async with conn.transaction():
-            user_row = await conn.fetchrow(
-                """
-                INSERT INTO users (
-                    email, first_name, last_name, phone_number, dni,
-                    password, created_at, is_active, is_approved
-                ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, false, true)
-                RETURNING id, email
-                """,
-                email, first_name, last_name, phone_number, dni, hashed_password
-            )
-
-            user_id = user_row["id"]
-
-            await conn.execute(
-                """
-                INSERT INTO email_verification_tokens (user_id, token, expires_at)
-                VALUES ($1, $2, $3)
-                """,
-                user_id, token, expires_at
-            )
-
-    # Envío del email de verificación
-    try:
-        await send_verification_email(email, token)
-    except Exception:
-        # Usuario queda creado y se puede reintentar el envío
-        return jsonify({
-            "message": "Usuario creado, no se pudo enviar el email de verificación, reintentalo más tarde"
-        }), 201
-
-    return jsonify({"message": "Email enviado, esperando verificación"}), 201
 
 
 @auth_bp.route("/verify-email", methods=["GET"])

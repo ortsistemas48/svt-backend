@@ -1,6 +1,7 @@
 # stickers_bp.py
 from quart import Blueprint, request, jsonify
 from app.db import get_conn_ctx
+from datetime import date
 
 stickers_bp = Blueprint("stickers", __name__, url_prefix="/stickers")
 
@@ -416,6 +417,198 @@ async def set_sticker_status(sticker_id: int):
 
     return jsonify({"ok": True, "sticker_id": row["id"], "status": row["status"]}), 200
 
+
+@stickers_bp.route("/orders", methods=["POST"])
+async def create_sticker_order():
+    """
+    Crea una orden y hace bulk-insert de obleas.
+    Body JSON:
+      - workshop_id: int, requerido
+      - name: str, requerido
+      - note: str, opcional
+      - stickers: [str], requerido
+      - expiration_date: "YYYY-MM-DD" o null, opcional, se aplica a todas
+    """
+    data = await request.get_json(silent=True) or {}
+    workshop_id = data.get("workshop_id")
+    name = str(data.get("name", "")).strip()
+    note = str(data.get("note", "")).strip() or None
+    stickers = data.get("stickers") or []
+    exp_raw = data.get("expiration_date", None)
+
+    if not isinstance(workshop_id, int):
+        return jsonify({"error": "workshop_id requerido"}), 400
+    if not name:
+        return jsonify({"error": "name requerido"}), 400
+    if not isinstance(stickers, list) or len(stickers) == 0:
+        return jsonify({"error": "stickers debe ser lista no vacía"}), 400
+
+    expiration_date = None
+    if isinstance(exp_raw, str) and exp_raw.strip():
+        try:
+            expiration_date = date.fromisoformat(exp_raw.strip())
+        except ValueError:
+            return jsonify({"error": "expiration_date inválido, formato esperado YYYY-MM-DD"}), 400
+
+    norm_numbers = []
+    for s in stickers:
+        if isinstance(s, str) and s.strip():
+            norm_numbers.append(s.strip())
+
+    if not norm_numbers:
+        return jsonify({"error": "stickers no válidos"}), 400
+
+    async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            order_row = await conn.fetchrow(
+                """
+                INSERT INTO sticker_orders (workshop_id, name, note, status)
+                VALUES ($1, $2, $3, 'Creada')
+                RETURNING id, workshop_id, name, note, status, created_at
+                """,
+                workshop_id, name, note
+            )
+            order_id = order_row["id"]
+
+            existing = await conn.fetch(
+                "SELECT sticker_number FROM stickers WHERE sticker_number = ANY($1::text[])",
+                norm_numbers
+            )
+            existing_set = {r["sticker_number"] for r in existing}
+            to_insert = [s for s in norm_numbers if s not in existing_set]
+
+            inserted = 0
+            BATCH = 1000
+            status_disponible = "Disponible"
+
+            for i in range(0, len(to_insert), BATCH):
+                batch = to_insert[i:i+BATCH]
+                # Insert con expiration_date opcional
+                await conn.execute(
+                    """
+                    INSERT INTO stickers (sticker_order_id, sticker_number, status, expiration_date)
+                    SELECT $1, s, $2, $3 FROM UNNEST($4::text[]) AS t(s)
+                    """,
+                    order_id, status_disponible, expiration_date, batch
+                )
+                inserted += len(batch)
+
+            await conn.execute(
+                "UPDATE sticker_orders SET amount = COALESCE(amount, 0) + $1 WHERE id = $2",
+                inserted, order_id
+            )
+
+    return jsonify({
+        "ok": True,
+        "order": {
+            "id": order_row["id"],
+            "name": order_row["name"],
+            "workshop_id": order_row["workshop_id"],
+            "note": order_row["note"],
+            "status": order_row["status"],
+            "created_at": order_row["created_at"].isoformat() if order_row.get("created_at") else None,
+            "amount": inserted
+        },
+        "inserted": inserted,
+        "duplicates": sorted(existing_set) if existing_set else []
+    }), 201
+
+
+@stickers_bp.route("/orders/<int:order_id>", methods=["GET"])
+async def get_sticker_order(order_id: int):
+    async with get_conn_ctx() as conn:
+        order = await conn.fetchrow(
+            "SELECT id, workshop_id, name, note, status, amount, created_at FROM sticker_orders WHERE id = $1",
+            order_id
+        )
+        if not order:
+            return jsonify({"error": "orden no encontrada"}), 404
+
+        rows = await conn.fetch(
+            """
+            SELECT id, sticker_number, status, expiration_date, issued_at
+            FROM stickers
+            WHERE sticker_order_id = $1
+            ORDER BY id ASC
+            """,
+            order_id
+        )
+
+    stickers = []
+    for r in rows:
+        d = dict(r)
+        for k in ("expiration_date", "issued_at"):
+            if d.get(k) is not None and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        stickers.append(d)
+
+    out = dict(order)
+    if out.get("created_at") is not None and hasattr(out["created_at"], "isoformat"):
+        out["created_at"] = out["created_at"].isoformat()
+
+    return jsonify({"order": out, "stickers": stickers}), 200
+
+
+@stickers_bp.route("/orders/<int:order_id>/add-stickers", methods=["POST"])
+async def add_stickers_to_order(order_id: int):
+    """
+    Agrega más stickers a una orden.
+    Body:
+      - stickers: [str], requerido
+      - expiration_date: "YYYY-MM-DD" o null, opcional, se aplica a estos nuevos
+    """
+    data = await request.get_json(silent=True) or {}
+    stickers = data.get("stickers") or []
+    exp_raw = data.get("expiration_date", None)
+
+    if not isinstance(stickers, list) or not stickers:
+        return jsonify({"error": "stickers debe ser lista no vacía"}), 400
+
+    expiration_date = None
+    if isinstance(exp_raw, str) and exp_raw.strip():
+        try:
+            expiration_date = date.fromisoformat(exp_raw.strip())
+        except ValueError:
+            return jsonify({"error": "expiration_date inválido, formato esperado YYYY-MM-DD"}), 400
+
+    norm_numbers = []
+    for s in stickers:
+        if isinstance(s, str) and s.strip():
+            norm_numbers.append(s.strip())
+
+    async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            exists = await conn.fetchval("SELECT 1 FROM sticker_orders WHERE id = $1", order_id)
+            if not exists:
+                return jsonify({"error": "orden no encontrada"}), 404
+
+            existing = await conn.fetch(
+                "SELECT sticker_number FROM stickers WHERE sticker_number = ANY($1::text[])",
+                norm_numbers
+            )
+            existing_set = {r["sticker_number"] for r in existing}
+            to_insert = [s for s in norm_numbers if s not in existing_set]
+
+            inserted = 0
+            BATCH = 1000
+            status_disponible = "Disponible"
+            for i in range(0, len(to_insert), BATCH):
+                batch = to_insert[i:i+BATCH]
+                await conn.execute(
+                    """
+                    INSERT INTO stickers (sticker_order_id, sticker_number, status, expiration_date)
+                    SELECT $1, s, $2, $3 FROM UNNEST($4::text[]) AS t(s)
+                    """,
+                    order_id, status_disponible, expiration_date, batch
+                )
+                inserted += len(batch)
+
+            await conn.execute(
+                "UPDATE sticker_orders SET amount = COALESCE(amount, 0) + $1 WHERE id = $2",
+                inserted, order_id
+            )
+
+    return jsonify({"ok": True, "inserted": inserted, "duplicates": sorted(existing_set)}), 200
 
 
 @stickers_bp.route("/next-available", methods=["GET"])
