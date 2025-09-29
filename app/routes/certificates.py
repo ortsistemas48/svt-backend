@@ -8,6 +8,7 @@ import requests
 from dateutil import tz
 from app.db import get_conn_ctx
 from datetime import datetime, timedelta
+import pytz
 from supabase import create_client, Client
 
 certificates_bp = Blueprint("certificates", __name__)
@@ -318,7 +319,10 @@ async def certificates_generate_by_application(app_id: int):
     # fecha de emisión, usa created_at de la inspección si existe
     fecha_emision_dt = insp["created_at"] if insp and "created_at" in insp else row["app_date"]
     fecha_emision = _fmt_date(fecha_emision_dt)
-    fecha_vencimiento = _fmt_date(datetime.utcnow() + timedelta(days=365)) if fecha_emision else None
+    # Usar fecha actual en Argentina para vencimiento
+    argentina_tz = pytz.timezone('America/Argentina/Buenos_Aires')
+    now_argentina = datetime.datetime.now(argentina_tz)
+    fecha_vencimiento = _fmt_date(now_argentina + timedelta(days=365)) if fecha_emision else None
 
     # condición final
     resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")

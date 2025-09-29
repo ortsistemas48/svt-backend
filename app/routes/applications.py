@@ -3,6 +3,7 @@ from app.db import get_conn_ctx
 import uuid
 import datetime
 from dateutil import parser
+import pytz
 
 applications_bp = Blueprint("applications", __name__)
 
@@ -19,12 +20,16 @@ async def create_application():
     if not workshop_id:
         return jsonify({"error": "Falta el workshop_id"}), 400
 
+    # Obtener la hora actual en Argentina (UTC-3)
+    argentina_tz = pytz.timezone('America/Argentina/Buenos_Aires')
+    now_argentina = datetime.datetime.now(argentina_tz)
+
     async with get_conn_ctx() as conn:
         result = await conn.fetchrow("""
             INSERT INTO applications (user_id, workshop_id, date)
             VALUES ($1, $2, $3)
             RETURNING id
-        """, user_id, int(workshop_id), datetime.datetime.utcnow())
+        """, user_id, int(workshop_id), now_argentina)
 
     application_id = result["id"]
 
@@ -35,27 +40,43 @@ async def create_application():
 async def add_or_update_owner(app_id):
     data = await request.get_json()
     app_id = int(app_id)
+    
+    # Validar que se proporcione DNI
+    dni = data.get("dni")
+    if not dni:
+        return jsonify({"error": "DNI es requerido"}), 400
+    
     async with get_conn_ctx() as conn:
-        owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
+        # Verificar si ya existe una persona con este DNI
+        existing_person_id = await conn.fetchval(
+            "SELECT id FROM persons WHERE dni = $1", dni
+        )
         
-        if not owner_id:
+        if existing_person_id:
+            # Usar la persona existente y actualizar sus datos
+            await conn.execute("""
+                UPDATE persons
+                SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
+                    city = $6, province = $7, is_owner = TRUE
+                WHERE id = $8
+            """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
+                data.get("address"), data.get("city"), data.get("province"), existing_person_id)
+            
+            # Asignar la persona existente a la aplicación
+            await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", existing_person_id, app_id)
+            owner_id = existing_person_id
+        else:
+            # Crear nueva persona solo si no existe
             owner_id = await conn.fetchval("""
                 INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, is_owner)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), data.get("dni"))
+                data.get("address"), data.get("city"), data.get("province"), dni)
+            
             await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", owner_id, app_id)
-        else:
-            await conn.execute("""
-                UPDATE persons
-                SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, dni = $8, is_owner = TRUE
-                WHERE id = $9
-            """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), data.get("dni"), owner_id)
 
-    return jsonify({"message": "Titular guardado"}), 200
+    return jsonify({"message": "Titular guardado", "person_id": owner_id}), 200
 
 
 @applications_bp.route("/<app_id>/driver", methods=["PUT"])
@@ -63,43 +84,50 @@ async def add_or_update_driver(app_id):
     data = await request.get_json()
     is_same = data.get("is_same_person", False)
     app_id = int(app_id)
+    
     async with get_conn_ctx() as conn:
-
         if is_same:
             owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
             if not owner_id:
-                await conn.close()
                 return jsonify({"error": "Primero debe cargarse el titular (owner)"}), 400
 
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", owner_id, app_id)
-            await conn.close()
-            return jsonify({"message": "Conductor asignado como titular"}), 200
+            return jsonify({"message": "Conductor asignado como titular", "person_id": owner_id}), 200
 
-        owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
-        driver_id = await conn.fetchval("SELECT driver_id FROM applications WHERE id = $1", app_id)
+        # Validar que se proporcione DNI
+        dni = data.get("dni")
+        if not dni:
+            return jsonify({"error": "DNI es requerido"}), 400
 
-        # Si no hay driver o es igual al owner, se crea uno nuevo
-        if not driver_id or driver_id == owner_id:
+        # Verificar si ya existe una persona con este DNI
+        existing_person_id = await conn.fetchval(
+            "SELECT id FROM persons WHERE dni = $1", dni
+        )
+        
+        if existing_person_id:
+            # Usar la persona existente y actualizar sus datos
+            await conn.execute("""
+                UPDATE persons
+                SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
+                    city = $6, province = $7, is_owner = FALSE
+                WHERE id = $8
+            """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
+                data.get("address"), data.get("city"), data.get("province"), existing_person_id)
+            
+            # Asignar la persona existente como conductor
+            await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", existing_person_id, app_id)
+            return jsonify({"message": "Conductor guardado", "person_id": existing_person_id}), 200
+        else:
+            # Crear nueva persona solo si no existe
             driver_id = await conn.fetchval("""
                 INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, is_owner)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), data.get("dni"))
+                data.get("address"), data.get("city"), data.get("province"), dni)
 
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", driver_id, app_id)
-
-        else:
-            # Actualiza al conductor si ya existe y es diferente del owner
-            await conn.execute("""
-                UPDATE persons
-                SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, dni = $8, is_owner = FALSE
-                WHERE id = $9
-            """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), data.get("dni"), driver_id)
-
-    return jsonify({"message": "Conductor guardado"}), 200
+            return jsonify({"message": "Conductor guardado", "person_id": driver_id}), 200
 
 
 # Paso 4: Agregar o reutilizar auto por patente, luego vincular a la application
@@ -843,6 +871,117 @@ async def list_completed_applications_by_workshop(workshop_id: int):
     return jsonify(response), 200
 
 
+@applications_bp.route("/workshop/<int:workshop_id>/daily-statistics", methods=["GET"])
+async def get_daily_statistics(workshop_id: int):
+    """
+    Devuelve estadísticas diarias del taller incluyendo:
+    - Número de aplicaciones del día
+    - Número de aplicaciones en cola ('En Cola')
+    - Tasa de aprobación del día
+    - Stock actual de stickers del taller
+    
+    Parámetros:
+      - workshop_id: int (en la URL)
+      - date: str (opcional, formato YYYY-MM-DD, por defecto hoy)
+    """
+    try:
+        user_id = g.get("user_id")
+        if not user_id:
+            return jsonify({"error": "No autorizado"}), 401
+
+        # Obtener fecha (por defecto hoy)
+        date_str = request.args.get("date", "")
+        if date_str:
+            try:
+                target_date = parser.parse(date_str).date()
+            except ValueError:
+                return jsonify({"error": "Formato de fecha inválido. Use YYYY-MM-DD"}), 400
+        else:
+            # Usar la fecha actual en Argentina
+            argentina_tz = pytz.timezone('America/Argentina/Buenos_Aires')
+            target_date = datetime.datetime.now(argentina_tz).date()
+
+        async with get_conn_ctx() as conn:
+            # 1. Estadísticas de aplicaciones del día (solo aplicaciones completas)
+            app_stats = await conn.fetchrow(
+                """
+                SELECT 
+                    COUNT(*) as total_applications,
+                    COUNT(CASE WHEN status = 'En Cola' THEN 1 END) as applications_in_queue,
+                    COUNT(CASE WHEN status = 'Completado' AND result = 'Apto' THEN 1 END) as approved_applications,
+                    COUNT(CASE WHEN status = 'Completado' THEN 1 END) as completed_applications
+                FROM applications a
+                LEFT JOIN persons o ON a.owner_id = o.id
+                LEFT JOIN persons d ON a.driver_id = d.id
+                LEFT JOIN cars c ON a.car_id = c.id
+                WHERE a.workshop_id = $1 
+                  AND a.date::date = $2
+                  AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.driver_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
+                  AND o.first_name IS NOT NULL
+                  AND o.last_name IS NOT NULL
+                  AND o.dni IS NOT NULL
+                  AND d.first_name IS NOT NULL
+                  AND d.last_name IS NOT NULL
+                  AND d.dni IS NOT NULL
+                  AND c.license_plate IS NOT NULL
+                  AND c.brand IS NOT NULL
+                  AND c.model IS NOT NULL
+                """,
+                workshop_id, target_date
+            )
+            
+            # 2. Stock de stickers del taller
+            sticker_stock = await conn.fetchrow(
+                """
+                SELECT 
+                    COUNT(*) as total_stickers,
+                    COUNT(CASE WHEN lower(s.status) = 'disponible' THEN 1 END) as available_stickers,
+                    COUNT(CASE WHEN lower(s.status) = 'en uso' THEN 1 END) as used_stickers,
+                    COUNT(CASE WHEN lower(s.status) = 'no disponible' THEN 1 END) as unavailable_stickers
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                WHERE so.workshop_id = $1
+                """,
+                workshop_id
+            )
+
+            # Calcular tasa de aprobación
+            total_completed = app_stats["completed_applications"] or 0
+            total_approved = app_stats["approved_applications"] or 0
+            
+            approval_rate = 0.0
+            if total_completed > 0:
+                approval_rate = round((total_approved / total_completed) * 100, 2)
+
+            # Preparar respuesta
+            statistics = {
+                "date": target_date.isoformat(),
+                "workshop_id": workshop_id,
+                "applications": {
+                    "total": app_stats["total_applications"] or 0,
+                    "in_queue": app_stats["applications_in_queue"] or 0,
+                    "completed": total_completed,
+                    "approved": total_approved,
+                    "approval_rate": approval_rate
+                },
+                "sticker_stock": {
+                    "total": sticker_stock["total_stickers"] or 0,
+                    "available": sticker_stock["available_stickers"] or 0,
+                    "used": sticker_stock["used_stickers"] or 0,
+                    "unavailable": sticker_stock["unavailable_stickers"] or 0
+                }
+            }
+
+        return jsonify(statistics), 200
+
+    except Exception as e:
+        print(f"Error in get_daily_statistics: {str(e)}")
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
+
 @applications_bp.route("/<int:app_id>/soft-delete", methods=["POST"])
 async def soft_delete_application(app_id: int):
     user_id = g.get("user_id")
@@ -863,3 +1002,5 @@ async def soft_delete_application(app_id: int):
         )
 
     return jsonify({"message": "Trámite marcado como eliminado"}), 200
+
+

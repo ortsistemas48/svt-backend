@@ -1,0 +1,27 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+quart = "*"
+asyncpg = "*"
+python-dotenv = "*"
+passlib = "*"
+bcrypt = "==3.2.0"
+pyjwt = "*"
+quart-cors = "*"
+supabase = "*"
+pytest = "*"
+pytest-asyncio = "*"
+httpx = "*"
+pymupdf = "*"
+qrcode = "*"
+requests = "*"
+pillow = "*"
+pytz = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"

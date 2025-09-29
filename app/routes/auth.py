@@ -8,6 +8,7 @@ from quart.utils import run_sync
 import os
 from app.email import generate_email_token, send_verification_email, send_account_credentials_email,send_assigned_to_workshop_email
 import logging
+import pytz
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +323,7 @@ async def verify_email():
         if not row:
             return out("invalid")
 
-        # fechas aware
+        # fechas aware - usar UTC para tokens de sistema
         def to_aware_utc(dt: datetime.datetime) -> datetime.datetime:
             if dt.tzinfo is None:
                 return dt.replace(tzinfo=datetime.timezone.utc)
