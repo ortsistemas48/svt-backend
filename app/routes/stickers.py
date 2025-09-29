@@ -102,7 +102,7 @@ async def list_orders():
     WITH counts AS (
       SELECT
         so.id,
-        COUNT(s.id) FILTER (WHERE c.id IS NULL) AS available_count
+        COUNT(s.id) FILTER (WHERE s.status = 'Disponible' AND c.id IS NULL) AS available_count
       FROM sticker_orders so
       LEFT JOIN stickers s ON s.sticker_order_id = so.id
       LEFT JOIN cars c     ON c.sticker_id = s.id
