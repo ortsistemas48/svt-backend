@@ -9,6 +9,8 @@ from .certificates import certificates_bp
 from .application_documents import docs_bp
 from .persons import persons_bp
 from .inspection_documents import inspection_docs_bp
+from .payments import payments_bp
+from .payment_receipts import payment_receipts_bp
 
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/auth")
@@ -22,3 +24,5 @@ def register_routes(app):
     app.register_blueprint(docs_bp, url_prefix="/docs")
     app.register_blueprint(persons_bp, url_prefix="/persons")
     app.register_blueprint(inspection_docs_bp, url_prefix="/inspections")
+    app.register_blueprint(payments_bp, url_prefix="/payments")
+    app.register_blueprint(payment_receipts_bp, url_prefix="/payment_receipts")
