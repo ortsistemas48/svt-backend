@@ -40,13 +40,6 @@ async def _user_belongs_to_workshop(conn, user_id: int, workshop_id: int) -> boo
 
 @payment_receipts_bp.route("/orders/<int:order_id>/receipt", methods=["POST"])
 async def upload_payment_receipt(order_id: int):
-    """
-    Sube un único comprobante a Supabase en carpeta 'comprobantes'
-    y guarda el link en la orden de pago.
-
-    multipart/form-data:
-      file, File requerido
-    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -72,41 +65,56 @@ async def upload_payment_receipt(order_id: int):
                 return jsonify({"error": "No tenés acceso a la orden"}), 403
 
     # leer archivo
-    files = (await request.files).getlist("file") or (await request.files).getlist("files")
+    form = await request.files
+    files = form.getlist("file") or form.getlist("files")
     if not files:
         return jsonify({"error": "No se recibió archivo"}), 400
     if len(files) > 1:
         return jsonify({"error": "Solo se admite un archivo de comprobante"}), 400
 
     f = files[0]
-    data = f.read()
+    data = f.read()  # <- sync, devuelve bytes
     if not isinstance(data, (bytes, bytearray)):
         return jsonify({"error": f"No se pudo leer el archivo {f.filename}"}), 400
 
     if len(data) > 15 * 1024 * 1024:
         return jsonify({"error": "El archivo excede 15MB"}), 413
 
-    # tipos aceptados
     mime = (f.mimetype or "application/octet-stream").lower()
     allowed = {"image/png", "image/jpeg", "image/webp", "application/pdf"}
     if mime not in allowed:
         return jsonify({"error": "Formato inválido, permitidos, PNG, JPG, WEBP o PDF"}), 415
 
-    # subir a Supabase
     client = _get_supabase_client()
     safe_name = (f.filename or "comprobante").replace("/", "_").replace("\\", "_")
     dest = f"comprobantes/payments/{order_id}/{uuid.uuid4().hex}-{safe_name}"
 
-    client.storage.from_(BUCKET_DOCS).upload(
-        path=dest,
-        file=data,
-        file_options={
-            "content_type": mime,
-            "x-upsert": "true",
-        },
-    )
-    url = _public_url(BUCKET_DOCS, dest)
+    # file_options: SOLO strings
+    file_options = {
+        "content-type": mime,
+        "cache-control": "3600",
+        "content-disposition": f'inline; filename="{safe_name}"',
+    }
 
+    # 1) Intento moderno: upsert como kwarg (supabase-py reciente)
+    try:
+        client.storage.from_(BUCKET_DOCS).upload(
+            path=dest,
+            file=data,
+            file_options=file_options,
+            upsert=True,  # ← NO va dentro de file_options
+        )
+    except TypeError:
+        # 2) Fallback para versiones que no aceptan kwarg upsert
+        # usar header x-upsert pero en STRING, no bool
+        file_options["x-upsert"] = "true"
+        client.storage.from_(BUCKET_DOCS).upload(
+            path=dest,
+            file=data,
+            file_options=file_options,
+        )
+
+    url = _public_url(BUCKET_DOCS, dest)
     # guardar en la orden
     async with get_conn_ctx() as conn:
         row = await conn.fetchrow(
@@ -133,7 +141,9 @@ async def upload_payment_receipt(order_id: int):
             "receipt_url": row["receipt_url"],
             "receipt_mime": row["receipt_mime"],
             "receipt_size": row["receipt_size"],
-            "receipt_uploaded_at": row["receipt_uploaded_at"].isoformat() if isinstance(row["receipt_uploaded_at"], dt.datetime) else row["receipt_uploaded_at"],
+            "receipt_uploaded_at": row["receipt_uploaded_at"].isoformat()
+                if isinstance(row["receipt_uploaded_at"], dt.datetime)
+                else row["receipt_uploaded_at"],
         }
     }), 201
 

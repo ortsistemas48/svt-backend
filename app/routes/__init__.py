@@ -11,6 +11,7 @@ from .persons import persons_bp
 from .inspection_documents import inspection_docs_bp
 from .payments import payments_bp
 from .payment_receipts import payment_receipts_bp
+from .payments_admin import payments_admin_bp
 
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/auth")
@@ -26,3 +27,4 @@ def register_routes(app):
     app.register_blueprint(inspection_docs_bp, url_prefix="/inspections")
     app.register_blueprint(payments_bp, url_prefix="/payments")
     app.register_blueprint(payment_receipts_bp, url_prefix="/payment_receipts")
+    app.register_blueprint(payments_admin_bp , url_prefix="/payments_admin")

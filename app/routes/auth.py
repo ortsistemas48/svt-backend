@@ -122,7 +122,7 @@ async def register():
 
     # 1) Credenciales
     try:
-        displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
+        displayed_password = password if EMAIL_PLAIN_PASSWORDS else "Error"
         login_url = f"{FRONTEND_URL}/login"
         force_reset_url = None if EMAIL_PLAIN_PASSWORDS else f"{FRONTEND_URL}/reset-password?email={email}"
 

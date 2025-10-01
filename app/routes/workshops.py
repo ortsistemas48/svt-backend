@@ -559,6 +559,7 @@ def _camel_ws_row(row) -> dict:
         # Mantengo snake por compatibilidad, si querés camel cambiá a plantNumber
         "plant_number": row["plant_number"],
         "disposition_number": row["disposition_number"],
+        "available_inspections": row["available_inspections"],
     }
 
 # ====== 1) Obtener datos del taller ======
@@ -578,7 +579,7 @@ async def get_workshop(workshop_id: int):
 
         row = await conn.fetchrow(
             """
-            SELECT id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
+            SELECT id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number, available_inspections
             FROM workshop
             WHERE id = $1
             """,
@@ -586,6 +587,8 @@ async def get_workshop(workshop_id: int):
         )
         if not row:
             return jsonify({"error": "Workshop no encontrado"}), 404
+        
+        print(_camel_ws_row(row))
 
     return jsonify(_camel_ws_row(row)), 200
 
