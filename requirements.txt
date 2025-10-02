@@ -13,3 +13,4 @@ pymupdf
 qrcode
 requests
 pillow
+hypercorn
