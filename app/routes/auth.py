@@ -443,7 +443,23 @@ async def login():
             "last_name": user["last_name"],
         }
     })
-    response.set_cookie("token", token, httponly=True, samesite="Lax", secure=False)
+    ENV = os.getenv("ENV", "development")
+    if ENV == "production":
+        response.set_cookie(
+            "token",
+            token,
+            httponly=True,
+            samesite="None",   
+            secure=True       
+        )
+    else:
+        response.set_cookie(
+            "token",
+            token,
+            httponly=True,
+            samesite="Lax",   
+            secure=False   
+        )
     return response
 
 
