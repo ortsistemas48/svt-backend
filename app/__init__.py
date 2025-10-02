@@ -32,5 +32,12 @@ def create_app():
 
     register_routes(app)
 
-    app = cors(app, allow_origin="http://localhost:3000", allow_credentials=True)
+    app = cors(
+        app,
+        allow_origin=[
+            "http://localhost:3000",
+            "https://svt-frontend.vercel.app"
+        ],
+        allow_credentials=True
+    )
     return app
