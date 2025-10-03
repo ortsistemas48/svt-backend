@@ -405,6 +405,72 @@ async def resend_verification():
     return jsonify({"message": "Te enviamos un nuevo email de verificación"}), 200
 
 
+@auth_bp.route("/owner/register", methods=["POST"])
+async def register_user():
+    data = await request.get_json()
+
+    email = data.get("email")
+    password = data.get("password")
+    confirm_password = data.get("confirm_password")
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    dni = data.get("dni")
+    phone_number = data.get("phone_number")
+
+    # Validaciones mínimas
+    if not all([email, password, confirm_password, first_name, last_name]):
+        return jsonify({"error": "Todos los campos obligatorios deben completarse"}), 400
+
+    if password != confirm_password:
+        return jsonify({"error": "Las contraseñas no coinciden"}), 400
+
+    async with get_conn_ctx() as conn:
+
+        existing_user = await conn.fetchrow(
+            "SELECT 1 FROM users WHERE email = $1",
+            email
+        )
+        if existing_user:
+            return jsonify({"error": "El email ya está en uso"}), 400
+
+        hashed_password = bcrypt.hash(password)
+        token = generate_email_token()
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+
+        async with conn.transaction():
+            user_row = await conn.fetchrow(
+                """
+                INSERT INTO users (
+                    email, first_name, last_name, phone_number, dni,
+                    password, created_at, is_active, is_approved
+                ) VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, false, true)
+                RETURNING id, email
+                """,
+                email, first_name, last_name, phone_number, dni, hashed_password
+            )
+
+            user_id = user_row["id"]
+
+            await conn.execute(
+                """
+                INSERT INTO email_verification_tokens (user_id, token, expires_at)
+                VALUES ($1, $2, $3)
+                """,
+                user_id, token, expires_at
+            )
+
+    # Envío del email de verificación
+    try:
+        await send_verification_email(email, token)
+    except Exception:
+        # Usuario queda creado y se puede reintentar el envío
+        return jsonify({
+            "message": "Usuario creado, no se pudo enviar el email de verificación, reintentalo más tarde"
+        }), 201
+
+    return jsonify({"message": "Email de verificación enviado, apruebalo para ingresar."}), 201
+
+
 # Login, bloquea si no activo o no aprobado
 @auth_bp.route("/login", methods=["POST"])
 async def login():
