@@ -546,7 +546,7 @@ async def me():
 
     async with get_conn_ctx() as conn:
         user = await conn.fetchrow("""
-            SELECT id, email, first_name, last_name, phone_number, is_admin
+            SELECT id, email, first_name, dni, last_name, phone_number, is_admin
             FROM users
             WHERE id = $1
         """, user_id)
