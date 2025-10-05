@@ -584,28 +584,33 @@ async def update_user(user_id):
 
     try:
         payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+        requester_id = int(payload["user_id"])
     except jwt.ExpiredSignatureError:
         return jsonify({"error": "Token expirado"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"error": "Token inválido"}), 401
 
+    # Solo el dueño puede editarse, si querés permitir admin, acá podrías chequear is_admin.
+    if requester_id != int(user_id):
+        return jsonify({"error": "No tenés permiso para editar este usuario"}), 403
+
     data = await request.get_json()
-    first_name = data.get("first_name")
-    last_name = data.get("last_name")
+    first_name   = data.get("first_name")
+    last_name    = data.get("last_name")
     phone_number = data.get("phone_number")
 
     if not any([first_name, last_name, phone_number]):
         return jsonify({"error": "No se enviaron campos para actualizar"}), 400
 
     async with get_conn_ctx() as conn:
-        user = await conn.fetchrow("SELECT id FROM users WHERE id = $1", user_id)
-        if not user:
+        exists = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", user_id)
+        if not exists:
             return jsonify({"error": "Usuario no encontrado"}), 404
 
         await conn.execute("""
             UPDATE users
-            SET first_name = COALESCE($1, first_name),
-                last_name = COALESCE($2, last_name),
+            SET first_name   = COALESCE($1, first_name),
+                last_name    = COALESCE($2, last_name),
                 phone_number = COALESCE($3, phone_number)
             WHERE id = $4
         """, first_name, last_name, phone_number, user_id)
@@ -643,3 +648,84 @@ async def approve_user(user_id):
     async with get_conn_ctx() as conn:
         await conn.execute("UPDATE users SET is_approved = true WHERE id = $1", user_id)
     return jsonify({"message": "Usuario aprobado"})
+
+
+@auth_bp.route("/change-password", methods=["POST"])
+async def change_password():
+    """
+    Body:
+      current_password, new_password, confirm_new_password
+    Requiere cookie de sesión.
+    """
+    token = request.cookies.get("token")
+    if not token:
+        return jsonify({"error": "No autenticado"}), 401
+
+    try:
+        payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+        user_id = payload["user_id"]
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    data = await request.get_json()
+    current_password       = (data or {}).get("current_password") or ""
+    new_password           = (data or {}).get("new_password") or ""
+    confirm_new_password   = (data or {}).get("confirm_new_password") or ""
+
+    if not all([current_password, new_password, confirm_new_password]):
+        return jsonify({"error": "Completá todos los campos"}), 400
+    if new_password != confirm_new_password:
+        return jsonify({"error": "Las contraseñas nuevas no coinciden"}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "La contraseña debe tener al menos 8 caracteres"}), 400
+
+    async with get_conn_ctx() as conn:
+        user = await conn.fetchrow("SELECT id, password FROM users WHERE id = $1", user_id)
+        if not user:
+            return jsonify({"error": "Usuario no encontrado"}), 404
+
+        if not bcrypt.verify(current_password, user["password"]):
+            return jsonify({"error": "La contraseña actual es incorrecta"}), 400
+        if bcrypt.verify(new_password, user["password"]):
+            return jsonify({"error": "La nueva contraseña no puede ser igual a la actual"}), 400
+
+        new_hash = bcrypt.hash(new_password)
+        await conn.execute("UPDATE users SET password = $1 WHERE id = $2", new_hash, user_id)
+
+    return jsonify({"message": "Contraseña actualizada correctamente"})
+
+
+@auth_bp.route("/me/phone", methods=["PUT"])
+async def update_my_phone():
+    """
+    Body:
+      phone_number
+    Requiere cookie de sesión.
+    """
+    token = request.cookies.get("token")
+    if not token:
+        return jsonify({"error": "No autenticado"}), 401
+
+    try:
+        payload = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+        user_id = payload["user_id"]
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expirado"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Token inválido"}), 401
+
+    data = await request.get_json()
+    phone_number = (data or {}).get("phone_number")
+    if phone_number is None:
+        return jsonify({"error": "Enviá phone_number"}), 400
+
+    # validación básica, opcional
+    if len(phone_number) > 32:
+        return jsonify({"error": "Teléfono demasiado largo"}), 400
+
+    async with get_conn_ctx() as conn:
+        await conn.execute("UPDATE users SET phone_number = $1 WHERE id = $2", phone_number, user_id)
+
+    return jsonify({"message": "Teléfono actualizado"})
