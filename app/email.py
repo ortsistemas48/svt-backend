@@ -4,7 +4,7 @@ from typing import Optional
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM = os.getenv("RESEND_FROM", "no-reply@example.com")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.checkrto.com")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
 
 log = logging.getLogger("email")
