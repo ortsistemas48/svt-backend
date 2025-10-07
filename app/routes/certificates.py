@@ -429,7 +429,7 @@ async def certificates_generate_by_application(app_id: int):
 
     oblea = str(row["sticker_number"] or "")
     current_year_ar = datetime.now(argentina_tz).year
-    crt_numero = f"{oblea}/{current_year_ar}" if oblea else ""
+    crt_numero = f"{row['application_id']}/{current_year_ar}"
 
     # Observaciones
     # 1) Por pasos, en una sola línea por paso, observaciones separadas por comas, sin envolver
@@ -494,16 +494,10 @@ async def certificates_generate_by_application(app_id: int):
         "${combustible}":           row["fuel_type"] or "",
         "${marca_chasis}":          row["chassis_brand"] or "",
         "${numero_chasis}":         row["chassis_number"] or "",
-
-        # Tipo de vehículo: solo el value
         "${tipo_vehiculo}":         tipo_puro,
-
         "${resultado_inspeccion}":  resultado,
         "${observaciones}":         observaciones_text,
-
-        # Clasificación con value - label y envoltura a 35
         "${clasif}":                clasificacion,
-
         "${resultado2}":            "",
         "${crt_numero}":            crt_numero,
     }
@@ -512,8 +506,12 @@ async def certificates_generate_by_application(app_id: int):
         doc = fitz.open(stream=template_bytes, filetype="pdf")
     except Exception as e:
         return jsonify({"error": f"No se pudo abrir el template PDF, {e}"}), 500
+    
+    oblea = str(row["sticker_number"] or "").strip()
+    qr_target = oblea if oblea else str(row["application_id"])
+    qr_link = f"https://www.checkrto.com/qr/{qr_target}"
 
-    qr_link = f"https://www.checkrto.com/qr/{oblea}"
+    # qr_link = f"https://www.checkrto.com/qr/{oblea}"
     qr_png = _make_qr_bytes(qr_link)
 
     counts = _replace_placeholders_transparente(doc, mapping, qr_png)

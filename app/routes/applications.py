@@ -313,7 +313,7 @@ async def get_application(id):
 
     async with get_conn_ctx() as conn:
         application = await conn.fetchrow("""
-            SELECT id, user_id, date, workshop_id, status, result
+            SELECT id, user_id, date, workshop_id, status, result, consumed
             FROM applications
             WHERE id = $1 
         """, id)
@@ -1004,3 +1004,71 @@ async def soft_delete_application(app_id: int):
     return jsonify({"message": "Trámite marcado como eliminado"}), 200
 
 
+@applications_bp.route("/<int:app_id>/consume-slot", methods=["POST"])
+async def consume_slot(app_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            app_row = await conn.fetchrow(
+                """
+                SELECT id, workshop_id, consumed, is_deleted
+                FROM applications
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                app_id
+            )
+            if not app_row or app_row["is_deleted"]:
+                return jsonify({"error": "Trámite no encontrado"}), 404
+
+            if app_row["consumed"] is True:
+                ws_row = await conn.fetchrow(
+                    "SELECT id, available_inspections FROM workshop WHERE id = $1",
+                    app_row["workshop_id"]
+                )
+                return jsonify({
+                    "message": "La aplicación ya había consumido cupo",
+                    "already_consumed": True,
+                    "workshop_id": app_row["workshop_id"],
+                    "available_inspections": ws_row["available_inspections"] if ws_row else None
+                }), 200
+
+            ws_row = await conn.fetchrow(
+                """
+                SELECT id, available_inspections
+                FROM workshop
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                app_row["workshop_id"]
+            )
+            if not ws_row:
+                return jsonify({"error": "Taller no encontrado para la aplicación"}), 404
+
+            available = int(ws_row["available_inspections"] or 0)
+            if available <= 0:
+                return jsonify({
+                    "error": "No hay inspecciones disponibles",
+                    "workshop_id": ws_row["id"],
+                    "available_inspections": available
+                }), 409
+
+            await conn.execute(
+                "UPDATE workshop SET available_inspections = $1 WHERE id = $2",
+                available - 1,
+                ws_row["id"]
+            )
+            await conn.execute(
+                "UPDATE applications SET consumed = TRUE WHERE id = $1",
+                app_id
+            )
+
+            return jsonify({
+                "message": "Cupo consumido",
+                "already_consumed": False,
+                "workshop_id": ws_row["id"],
+                "available_inspections": available - 1
+            }), 200
