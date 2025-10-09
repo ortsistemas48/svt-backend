@@ -954,32 +954,7 @@ async def get_daily_statistics(workshop_id: int):
                 """,
                 workshop_id
             )
-            daily_apps = await conn.fetch(
-                """
-                SELECT 
-                    a.id
-                FROM applications a
-                LEFT JOIN persons o ON a.owner_id = o.id
-                LEFT JOIN persons d ON a.driver_id = d.id
-                LEFT JOIN cars c ON a.car_id = c.id
-                WHERE a.workshop_id = $1 
-                  AND a.date::date = $2
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.driver_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND o.first_name IS NOT NULL
-                  AND o.last_name IS NOT NULL
-                  AND o.dni IS NOT NULL
-                  AND d.first_name IS NOT NULL
-                  AND d.last_name IS NOT NULL
-                  AND d.dni IS NOT NULL
-                  AND c.license_plate IS NOT NULL
-                  AND c.brand IS NOT NULL
-                  AND c.model IS NOT NULL
-                """,
-                workshop_id,target_date
-            )
+            
             # Preparar respuesta
             statistics = {
                 "date": target_date.isoformat(),
@@ -997,7 +972,6 @@ async def get_daily_statistics(workshop_id: int):
                 "workshop": {
                     "available_inspections": workshop_info["available_inspections"] if workshop_info else 0
                 },
-                "daily_apps": [app["id"] for app in daily_apps]
             }
 
         return jsonify(statistics), 200
