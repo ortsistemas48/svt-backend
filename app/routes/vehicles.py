@@ -39,6 +39,7 @@ async def get_vehicle_data(license_plate: str):
                 c.total_weight,
                 c.front_weight,
                 c.back_weight,
+                c.insurance,
                 -- Sticker (LEFT JOIN porque puede no existir)
                 s.id                  AS s_id,
                 s.sticker_number      AS s_sticker_number,
@@ -83,6 +84,7 @@ async def get_vehicle_data(license_plate: str):
             "total_weight": row["total_weight"],
             "front_weight": row["front_weight"],
             "back_weight": row["back_weight"],
+            "insurance": row["insurance"],
         }
 
         # Serializar fechas del auto
@@ -109,5 +111,4 @@ async def get_vehicle_data(license_plate: str):
             sticker = None
 
         car["sticker"] = sticker
-
         return jsonify(car), 200
