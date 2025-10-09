@@ -189,3 +189,41 @@ async def send_assigned_to_workshop_email(
         cta_url=url,
     )
     return await _send_email(to_email, subject, html)
+
+async def send_password_reset_email(
+    to_email: str,
+    first_name: Optional[str],
+    reset_url: str,
+):
+    subject = "Restablecé tu contraseña"
+    saludo = f"Hola {first_name}," if first_name else "Hola,"
+    intro = (
+        f"{saludo} recibimos una solicitud para restablecer tu contraseña. "
+        "Hacé clic en el botón para continuar, el enlace vence en 60 minutos."
+    )
+
+    extra_html = f"""
+      <div style="text-align:left;margin-top:18px">
+        <p style="margin:0 0 8px;color:#555;font-size:14px">
+          Si no fuiste vos, ignorá este mensaje. Tu cuenta seguirá segura.
+        </p>
+        <div style="margin:14px 0; padding:12px; background:#fff; border:1px solid #eee; border-radius:8px;">
+          <p style="margin:0 0 6px; font-weight:600; font-size:14px;">Consejos de seguridad</p>
+          <ul style="margin:0; padding-left:18px; color:#666; font-size:13px; line-height:1.5">
+            <li>Usá una contraseña única y difícil de adivinar</li>
+            <li>No compartas tu contraseña con nadie</li>
+            <li>Actualizá tu contraseña si sospechás actividad inusual</li>
+          </ul>
+        </div>
+      </div>
+    """
+
+    html = _wrap_html(
+        title="Restablecé tu contraseña",
+        intro=intro,
+        cta_text="Crear nueva contraseña",
+        cta_url=reset_url,
+        extra_html=extra_html,
+    )
+
+    return await _send_email(to_email, subject, html)

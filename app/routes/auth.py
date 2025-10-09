@@ -6,7 +6,7 @@ import datetime
 from quart.wrappers.response import Response
 from quart.utils import run_sync
 import os
-from app.email import generate_email_token, send_verification_email, send_account_credentials_email,send_assigned_to_workshop_email
+from app.email import generate_email_token, send_verification_email, send_account_credentials_email,send_assigned_to_workshop_email, send_password_reset_email
 import logging
 import pytz
 
@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 auth_bp = Blueprint("auth", __name__)
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://www.checkrto.com")
 EMAIL_PLAIN_PASSWORDS = True
 ENGINEER_ROLE_ID = 3
 
@@ -729,3 +729,83 @@ async def update_my_phone():
         await conn.execute("UPDATE users SET phone_number = $1 WHERE id = $2", phone_number, user_id)
 
     return jsonify({"message": "Teléfono actualizado"})
+
+
+@auth_bp.route("/forgot-password", methods=["POST"])
+async def forgot_password():
+    data = await request.get_json()
+    email = (data or {}).get("email", "").strip().lower()
+    if not email:
+        return jsonify({"ok": False, "error": "Email requerido"}), 400
+
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, first_name FROM users WHERE email = $1 LIMIT 1", email
+        )
+
+    if row:
+        payload = {
+            "sub": str(row["id"]),
+            "email": email,
+            "scope": "password_reset",
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1),
+            "iat": datetime.datetime.utcnow(),
+        }
+        token = jwt.encode(payload, current_app.config["JWT_SECRET"], algorithm="HS256")
+        reset_url = f"{FRONTEND_URL}/reset-password/{token}"
+        await send_password_reset_email(
+            to_email=email, first_name=row["first_name"], reset_url=reset_url
+        )
+
+    # no revelamos si existe o no
+    return jsonify({"ok": True})
+
+@auth_bp.route("/password-reset/verify", methods=["GET"])
+async def password_reset_verify():
+    token = request.args.get("token", "")
+    try:
+        data = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+        if data.get("scope") != "password_reset":
+            raise jwt.InvalidTokenError("scope invalido")
+        return jsonify({"ok": True, "email": data.get("email")})
+    except jwt.ExpiredSignatureError:
+        return jsonify({"ok": False, "error": "Token expirado"}), 400
+    except Exception:
+        return jsonify({"ok": False, "error": "Token invalido"}), 400
+
+@auth_bp.route("/reset-password", methods=["POST"])
+async def reset_password():
+    data = await request.get_json()
+    token = (data or {}).get("token", "")
+    password = (data or {}).get("password", "")
+    confirm = (data or {}).get("confirm", "")
+
+    if not token or not password or not confirm:
+        return jsonify({"ok": False, "error": "Datos incompletos"}), 400
+    if password != confirm:
+        return jsonify({"ok": False, "error": "Las contraseñas no coinciden"}), 400
+    if len(password) < 8:
+        return jsonify({"ok": False, "error": "La contraseña debe tener al menos 8 caracteres"}), 400
+
+    try:
+        data_jwt = jwt.decode(token, current_app.config["JWT_SECRET"], algorithms=["HS256"])
+        if data_jwt.get("scope") != "password_reset":
+            raise jwt.InvalidTokenError("scope invalido")
+    except jwt.ExpiredSignatureError:
+        return jsonify({"ok": False, "error": "Token expirado"}), 400
+    except Exception:
+        return jsonify({"ok": False, "error": "Token invalido"}), 400
+
+    email = data_jwt.get("email")
+    pwd_hash = bcrypt.hash(password)
+    async with get_conn_ctx() as conn:
+        await conn.execute(
+            """
+            UPDATE users
+            SET password = $1
+            WHERE email = $2
+            """,
+            pwd_hash,
+            email,
+        )
+    return jsonify({"ok": True})
