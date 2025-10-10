@@ -907,9 +907,7 @@ async def get_daily_statistics(workshop_id: int):
                 """
                 SELECT 
                     COUNT(*) as total_applications,
-                    COUNT(CASE WHEN status = 'En Cola' THEN 1 END) as applications_in_queue,
-                    COUNT(CASE WHEN status = 'Completado' AND result = 'Apto' THEN 1 END) as approved_applications,
-                    COUNT(CASE WHEN status = 'Completado' THEN 1 END) as completed_applications
+                    COUNT(CASE WHEN status = 'En Cola' THEN 1 END) as applications_in_queue
                 FROM applications a
                 LEFT JOIN persons o ON a.owner_id = o.id
                 LEFT JOIN persons d ON a.driver_id = d.id
@@ -932,7 +930,16 @@ async def get_daily_statistics(workshop_id: int):
                 """,
                 workshop_id, target_date
             )
-            
+            # 1.1. Obtener información del taller por separado
+            workshop_info = await conn.fetchrow(
+                """
+                SELECT available_inspections
+                FROM workshop
+                WHERE id = $1
+                """,
+                workshop_id
+            )
+           
             # 2. Stock de stickers del taller
             sticker_stock = await conn.fetchrow(
                 """
@@ -947,15 +954,7 @@ async def get_daily_statistics(workshop_id: int):
                 """,
                 workshop_id
             )
-
-            # Calcular tasa de aprobación
-            total_completed = app_stats["completed_applications"] or 0
-            total_approved = app_stats["approved_applications"] or 0
             
-            approval_rate = 0.0
-            if total_completed > 0:
-                approval_rate = round((total_approved / total_completed) * 100, 2)
-
             # Preparar respuesta
             statistics = {
                 "date": target_date.isoformat(),
@@ -963,16 +962,16 @@ async def get_daily_statistics(workshop_id: int):
                 "applications": {
                     "total": app_stats["total_applications"] or 0,
                     "in_queue": app_stats["applications_in_queue"] or 0,
-                    "completed": total_completed,
-                    "approved": total_approved,
-                    "approval_rate": approval_rate
                 },
                 "sticker_stock": {
                     "total": sticker_stock["total_stickers"] or 0,
                     "available": sticker_stock["available_stickers"] or 0,
                     "used": sticker_stock["used_stickers"] or 0,
                     "unavailable": sticker_stock["unavailable_stickers"] or 0
-                }
+                },
+                "workshop": {
+                    "available_inspections": workshop_info["available_inspections"] if workshop_info else 0
+                },
             }
 
         return jsonify(statistics), 200
