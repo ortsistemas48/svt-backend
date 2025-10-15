@@ -1113,3 +1113,98 @@ async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
             )
     # asyncpg devuelve "DELETE n", no hace falta retornar n exacto
     return jsonify({"message": "Observación eliminada"}), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/members/<uuid:member_user_id>/role", methods=["PUT", "OPTIONS"])
+async def set_member_role(workshop_id: int, member_user_id):
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    actor_id = g.get("user_id")
+    if not actor_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    role_name = (data.get("role") or "").strip()
+    role_id = data.get("user_type_id")
+
+    async with get_conn_ctx() as conn:
+        # Permisos, admin o OWNER del mismo taller
+        is_admin = await _is_admin(conn, actor_id)
+        if not is_admin:
+            # actor_id puede ser UUID en tu tabla, normalizo a str
+            belongs_as_owner = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                  SELECT 1 FROM workshop_users
+                  WHERE workshop_id = $1 AND user_id = $2::uuid AND user_type_id = $3
+                )
+                """,
+                workshop_id, str(actor_id), OWNER_ROLE_ID
+            )
+            if not belongs_as_owner:
+                return jsonify({"error": "Requiere admin o rol OWNER en este taller"}), 403
+
+        # Verificar que el usuario objetivo está asignado al taller
+        exists_target = await conn.fetchrow(
+            """
+            SELECT wu.user_type_id AS current_role
+            FROM workshop_users wu
+            WHERE wu.workshop_id = $1 AND wu.user_id = $2::uuid
+            """,
+            workshop_id, str(member_user_id)
+        )
+        if not exists_target:
+            return jsonify({"error": "Miembro no encontrado en este taller"}), 404
+
+        # Resolver role_id por nombre si llega "role"
+        if role_id is None:
+            if not role_name:
+                return jsonify({"error": "Falta role o user_type_id"}), 400
+            role_row = await conn.fetchrow(
+                "SELECT id FROM user_types WHERE LOWER(name) = LOWER($1)",
+                role_name
+            )
+            if not role_row:
+                return jsonify({"error": f"Rol inválido, no existe '{role_name}'"}), 400
+            role_id = role_row["id"]
+
+        # Evitar dejar al taller sin OWNER si estamos bajando al último OWNER
+        if exists_target["current_role"] == OWNER_ROLE_ID and role_id != OWNER_ROLE_ID:
+            is_last_owner = await conn.fetchval(
+                """
+                SELECT (SELECT COUNT(*) FROM workshop_users WHERE workshop_id = $1 AND user_type_id = $2) = 1
+                """,
+                workshop_id, OWNER_ROLE_ID
+            )
+            if is_last_owner:
+                return jsonify({"error": "No se puede cambiar el rol del único OWNER del taller"}), 400
+
+        # Guardar cambio y loguear
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE workshop_users
+                SET user_type_id = $3
+                WHERE workshop_id = $1 AND user_id = $2::uuid
+                """,
+                workshop_id, str(member_user_id), int(role_id)
+            )
+
+            meta = {
+                "ip": request.headers.get("X-Forwarded-For") or request.remote_addr,
+                "user_agent": request.headers.get("User-Agent"),
+                "reason": "set_member_role",
+                "new_role_id": int(role_id),
+                "new_role_name": role_name or None,
+            }
+            await conn.execute(
+                """
+                INSERT INTO workshop_user_logs
+                  (workshop_id, actor_user_id, target_user_id, target_prev_role, action, meta)
+                VALUES ($1, $2::uuid, $3::uuid, $4, 'SET_ROLE', $5::jsonb)
+                """,
+                workshop_id, str(actor_id), str(member_user_id), exists_target["current_role"], json.dumps(meta)
+            )
+
+    return jsonify({"ok": True, "workshop_id": workshop_id, "user_id": str(member_user_id), "user_type_id": int(role_id)}), 200

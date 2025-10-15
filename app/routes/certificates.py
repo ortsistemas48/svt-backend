@@ -468,6 +468,12 @@ async def certificates_generate_by_application(app_id: int):
         observaciones_text = f"{step_obs_text}\n\n{global_obs_wrapped}"
     else:
         observaciones_text = step_obs_text or global_obs_wrapped
+        
+    oblea = str(row["sticker_number"] or "").strip()
+    # qr_target = oblea if oblea else str(row["application_id"])
+    qr_target = oblea
+    qr_link = f"https://www.checkrto.com/qr/{qr_target}"
+    oblea_text = oblea if oblea else "Sin Asignar"
 
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
@@ -500,6 +506,7 @@ async def certificates_generate_by_application(app_id: int):
         "${clasif}":                clasificacion,
         "${resultado2}":            "",
         "${crt_numero}":            crt_numero,
+        "${oblea_numero}":          oblea_text, 
     }
 
     try:
@@ -507,9 +514,6 @@ async def certificates_generate_by_application(app_id: int):
     except Exception as e:
         return jsonify({"error": f"No se pudo abrir el template PDF, {e}"}), 500
     
-    oblea = str(row["sticker_number"] or "").strip()
-    qr_target = oblea if oblea else str(row["application_id"])
-    qr_link = f"https://www.checkrto.com/qr/{qr_target}"
 
     # qr_link = f"https://www.checkrto.com/qr/{oblea}"
     qr_png = _make_qr_bytes(qr_link)
