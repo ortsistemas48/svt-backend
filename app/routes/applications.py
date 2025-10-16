@@ -143,10 +143,16 @@ async def add_or_update_car(app_id):
 
     license_plate = normalize_plate(data.get("license_plate"))
 
-    green_card_expiration = (
-        parser.parse(data["green_card_expiration"]).date()
-        if data.get("green_card_expiration") else None
-    )
+    # Handle green card expiration - if no_expiration is true, set to None
+    green_card_no_expiration = data.get("green_card_no_expiration", False)
+    green_card_expiration = None
+    
+    if not green_card_no_expiration and data.get("green_card_expiration"):
+        green_card_expiration = parser.parse(data["green_card_expiration"]).date()
+
+    print(f"green_card_expiration: {green_card_expiration}")
+    print(f"green_card_no_expiration: {green_card_no_expiration}")
+
     license_expiration = (
         parser.parse(data["license_expiration"]).date()
         if data.get("license_expiration") else None
@@ -228,7 +234,7 @@ async def add_or_update_car(app_id):
                 chassis_number = COALESCE(EXCLUDED.chassis_number, cars.chassis_number),
                 chassis_brand = COALESCE(EXCLUDED.chassis_brand, cars.chassis_brand),
                 green_card_number = COALESCE(EXCLUDED.green_card_number, cars.green_card_number),
-                green_card_expiration = COALESCE(EXCLUDED.green_card_expiration, cars.green_card_expiration),
+                green_card_expiration = EXCLUDED.green_card_expiration,
                 license_number = COALESCE(EXCLUDED.license_number, cars.license_number),
                 license_expiration = COALESCE(EXCLUDED.license_expiration, cars.license_expiration),
                 vehicle_type = COALESCE(EXCLUDED.vehicle_type, cars.vehicle_type),
@@ -393,9 +399,13 @@ async def get_application_full(id):
                         if k.startswith("sticker__"):
                             car_dict.pop(k, None)
 
+                # Handle green card expiration dates and add no_expiration flag
                 for k in ("green_card_expiration", "license_expiration"):
                     if car_dict.get(k) is not None and hasattr(car_dict[k], "isoformat"):
                         car_dict[k] = car_dict[k].isoformat()
+                
+                # Add green_card_no_expiration field based on whether expiration is NULL
+                
 
                 if sticker:
                     car_dict["sticker"] = sticker
