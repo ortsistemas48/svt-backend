@@ -236,7 +236,7 @@ async def assign_sticker_to_car():
             # Opcional, marcar status como used
             if mark_used:
                 await conn.execute(
-                    "UPDATE stickers SET status = 'used' WHERE id = $1",
+                    "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
                     sticker_id
                 )
 
@@ -272,7 +272,12 @@ async def unassign_sticker_from_car():
 
             if set_available and old_sticker:
                 await conn.execute(
-                    "UPDATE stickers SET status = 'available' WHERE id = $1",
+                    "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                    old_sticker
+                )
+            elif set_available == False and old_sticker:
+                await conn.execute(
+                    "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
                     old_sticker
                 )
 
