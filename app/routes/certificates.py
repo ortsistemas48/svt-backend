@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import pytz
 from supabase import create_client, Client
 import textwrap
+from fitz import PDF_REDACT_IMAGE_NONE, PDF_REDACT_LINE_ART_NONE, PDF_REDACT_TEXT_REMOVE
 
 certificates_bp = Blueprint("certificates", __name__)
 
@@ -18,6 +19,34 @@ certificates_bp = Blueprint("certificates", __name__)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET_CERTS = os.getenv("SUPABASE_BUCKET_CERTS", "certificados")
+
+def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
+    s = base_size
+    n = len(value or "")
+
+    if ph in ("${domicilio}", "${modelo}"):
+        if n <= 20:
+            factor = 1.00
+        elif n <= 30:
+            factor = 0.85
+        elif n <= 40:
+            factor = 0.75
+        elif n <= 50:
+            factor = 0.65
+        else:
+            factor = 0.55
+        s *= factor
+
+    if ph == "${numero_motor}":
+        s *= 0.85
+        
+    if ph == "${numero_chasis}":
+        s *= 0.85
+
+    return s
+
+def _add_transparent_redaction(page: fitz.Page, rect: fitz.Rect):
+    page.add_redact_annot(rect, text=None, fill=False, cross_out=False)
 
 def _get_supabase_client() -> Client:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -130,16 +159,20 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
             if ms:
                 page_matches[ph] = ms
                 for m in ms:
-                    page.add_redact_annot(m["rect"], text="", fill=None)
+                    _add_transparent_redaction(page, m["rect"])
 
         qr_matches = []
         if qr_png is not None:
             qr_matches = _collect_placeholder_matches_with_style(page, "${qr}")
             for m in qr_matches:
-                page.add_redact_annot(m["rect"], text="", fill=None)
+                _add_transparent_redaction(page, m["rect"])
 
         if page_matches or qr_matches:
-            page.apply_redactions()
+            page.apply_redactions(
+                images=PDF_REDACT_IMAGE_NONE,        # no tocar píxeles de imágenes
+                graphics=PDF_REDACT_LINE_ART_NONE,   # no borrar vectores solapados
+                text=PDF_REDACT_TEXT_REMOVE          # eliminar solo el texto
+            )
 
         for ph, ms in page_matches.items():
             raw_val = mapping.get(ph, "")
@@ -152,7 +185,10 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 
                 base_size = float(m["size"])
                 mult = SIZE_MULTIPLIER.get(ph, 1.0)
+                
                 size = max(MIN_SIZE, min(MAX_SIZE, base_size * mult))
+                size = _adjust_font_size_by_length(ph, size, val)
+                size = max(MIN_SIZE, min(MAX_SIZE, size))
 
                 r = m["rect"]
                 padded = fitz.Rect(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1)
@@ -425,7 +461,7 @@ async def certificates_generate_by_application(app_id: int):
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
     uso_display = _usage_type_display((row["usage_type"] or "").strip())
     clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
-    clasificacion = _wrap_to_width(clasificacion_base, width=35)
+    clasificacion = _wrap_to_width(clasificacion_base, width=40)
 
     oblea = str(row["sticker_number"] or "")
     current_year_ar = datetime.now(argentina_tz).year
