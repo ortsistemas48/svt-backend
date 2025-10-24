@@ -1,7 +1,7 @@
 # stickers_bp.py
 from quart import Blueprint, request, jsonify
 from app.db import get_conn_ctx
-from datetime import date
+from datetime import date, datetime
 
 stickers_bp = Blueprint("stickers", __name__, url_prefix="/stickers")
 
@@ -14,14 +14,6 @@ def _norm_plate(p: str | None) -> str | None:
 
 @stickers_bp.route("/available", methods=["GET"])
 async def list_available_stickers():
-    """
-    Devuelve SOLO las obleas disponibles (status='Disponible') del taller indicado.
-    - No incluye obleas 'En Uso'.
-    - Excluye obleas vencidas (si tienen fecha de expiración).
-    - Excluye obleas que ya estén asignadas a algún auto (cars.sticker_id IS NOT NULL).
-    Parámetros:
-      - workshop_id: int (requerido)
-    """
     workshop_id = request.args.get("workshop_id", type=int)
     if not workshop_id:
         return jsonify({"error": "workshop_id requerido"}), 400
@@ -43,12 +35,11 @@ async def list_available_stickers():
               AND lower(s.status) = 'disponible'
               AND (s.expiration_date IS NULL OR s.expiration_date >= CURRENT_DATE)
               AND c.id IS NULL                    -- no asignada a ningún auto
-            ORDER BY s.id DESC
+            ORDER BY s.id ASC
             """,
             workshop_id,
         )
 
-    # Serializa fechas
     out = []
     for r in rows:
         d = dict(r)
@@ -162,7 +153,6 @@ async def list_sticker_orders():
     return jsonify(out), 200
 
 
-
 @stickers_bp.route("/<int:sticker_id>", methods=["GET"])
 async def get_sticker(sticker_id: int):
     async with get_conn_ctx() as conn:
@@ -187,13 +177,6 @@ async def get_sticker(sticker_id: int):
 
 @stickers_bp.route("/assign-to-car", methods=["POST"])
 async def assign_sticker_to_car():
-    """
-    Body JSON:
-      - license_plate: string, requerido
-      - sticker_id: int, requerido
-      - workshop_id: int, recomendado para validar taller
-      - mark_used: bool, opcional, por defecto true, actualiza status='used'
-    """
     data = await request.get_json()
     license_plate = _norm_plate(data.get("license_plate"))
     sticker_id = data.get("sticker_id")
@@ -205,7 +188,6 @@ async def assign_sticker_to_car():
 
     async with get_conn_ctx() as conn:
         async with conn.transaction():
-            # Validar que la oblea exista, sea del taller, y no esté en otro auto
             ok = await conn.fetchval(
                 """
                 SELECT CASE WHEN COUNT(*)>0 THEN true ELSE false END
@@ -221,7 +203,6 @@ async def assign_sticker_to_car():
             if not ok:
                 return jsonify({"error": "Oblea inválida o ya asignada"}), 400
 
-            # Asignar a car por patente, creando o actualizando según exista
             car_id = await conn.fetchval(
                 """
                 INSERT INTO cars (license_plate, sticker_id)
@@ -233,7 +214,6 @@ async def assign_sticker_to_car():
                 license_plate, sticker_id
             )
 
-            # Opcional, marcar status como used
             if mark_used:
                 await conn.execute(
                     "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
@@ -245,12 +225,6 @@ async def assign_sticker_to_car():
 
 @stickers_bp.route("/unassign-from-car", methods=["POST"])
 async def unassign_sticker_from_car():
-    """
-    Quita la oblea del auto, deja sticker_id en NULL.
-    Body JSON:
-      - license_plate: string, requerido
-      - set_available: bool, opcional, si true pone status='available'
-    """
     data = await request.get_json()
     license_plate = _norm_plate(data.get("license_plate"))
     set_available = bool(data.get("set_available", False))
@@ -283,6 +257,7 @@ async def unassign_sticker_from_car():
 
     return jsonify({"ok": True})
 
+
 @stickers_bp.route("/<int:sticker_id>/mark-used", methods=["POST"])
 async def mark_sticker_as_used(sticker_id: int):
     async with get_conn_ctx() as conn:
@@ -296,23 +271,9 @@ async def mark_sticker_as_used(sticker_id: int):
 
 @stickers_bp.route("/workshop/<int:workshop_id>", methods=["GET"])
 async def get_stickers_by_workshop(workshop_id: int):
-    """
-    Devuelve todas las obleas (stickers) de un taller específico con paginación.
-    Verifica que las obleas pertenezcan al taller a través de sticker_orders.
-    Incluye la patente del auto asignado (si existe).
-    Parámetros:
-      - workshop_id: int (en la URL)
-      - page: int (opcional, por defecto 1)
-      - per_page: int (opcional, por defecto 20, máximo 100)
-    Respuesta:
-      - Objeto con lista de obleas y metadatos de paginación
-      - license_plate: null si la oblea no está asignada a ningún auto
-    """
-    # Obtener parámetros de paginación
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
     
-    # Validar parámetros
     if page < 1:
         page = 1
     if per_page < 1:
@@ -320,11 +281,9 @@ async def get_stickers_by_workshop(workshop_id: int):
     if per_page > 100:
         per_page = 100
     
-    # Calcular offset
     offset = (page - 1) * per_page
 
     async with get_conn_ctx() as conn:
-        # Obtener total de registros
         total_count = await conn.fetchval(
             """
             SELECT COUNT(*)
@@ -335,7 +294,6 @@ async def get_stickers_by_workshop(workshop_id: int):
             workshop_id,
         )
         
-        # Obtener registros paginados
         rows = await conn.fetch(
             """
             SELECT
@@ -358,7 +316,6 @@ async def get_stickers_by_workshop(workshop_id: int):
             workshop_id, per_page, offset,
         )
 
-    # Serializa fechas
     stickers = []
     for r in rows:
         d = dict(r)
@@ -367,7 +324,6 @@ async def get_stickers_by_workshop(workshop_id: int):
                 d[k] = d[k].isoformat()
         stickers.append(d)
 
-    # Calcular metadatos de paginación
     total_pages = (total_count + per_page - 1) // per_page
     has_next = page < total_pages
     has_prev = page > 1
@@ -618,14 +574,6 @@ async def add_stickers_to_order(order_id: int):
 
 @stickers_bp.route("/next-available", methods=["GET"])
 async def get_next_available_sticker():
-    """
-    Devuelve la próxima oblea disponible (la que tomaría el sistema)
-    para una orden dada, sin asignarla.
-    Parámetros:
-      - sticker_order_id: int requerido
-    Respuesta:
-      - { id, sticker_number } o 404 si no hay
-    """
     sticker_order_id = request.args.get("sticker_order_id", type=int)
     if not isinstance(sticker_order_id, int):
         return jsonify({"error": "sticker_order_id requerido"}), 400
@@ -649,3 +597,146 @@ async def get_next_available_sticker():
         return jsonify({"error": "No hay obleas disponibles en esa orden"}), 404
 
     return jsonify({"id": row["id"], "sticker_number": row["sticker_number"]}), 200
+
+
+def _norm_sticker_number(raw: str) -> str:
+    return str(raw or "").upper().replace(" ", "").replace("-", "").replace("_", "").replace("/", "").replace(".", "")
+
+
+async def _get_or_create_manual_order(conn, workshop_id: int) -> int:
+    today_str = datetime.now().date().isoformat()
+    name = f"Manual {today_str}"
+
+    row = await conn.fetchrow(
+        "SELECT id FROM sticker_orders WHERE workshop_id = $1 AND name = $2",
+        workshop_id, name
+    )
+    if row:
+        return row["id"]
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO sticker_orders (workshop_id, name, note, status, amount)
+        VALUES ($1, $2, $3, 'Creada', 0)
+        RETURNING id
+        """,
+        workshop_id, name, "Alta manual de obleas"
+    )
+    return row["id"]
+
+
+@stickers_bp.route("/assign-by-number", methods=["POST"])
+async def assign_by_number():
+    data = await request.get_json(silent=True) or {}
+    license_plate = _norm_plate(data.get("license_plate"))
+    workshop_id = data.get("workshop_id")
+    raw_number = data.get("sticker_number")
+    mark_used = bool(data.get("mark_used", True))
+    forced_order_id = data.get("sticker_order_id", None)
+
+    if not license_plate:
+        return jsonify({"error": "license_plate requerido"}), 400
+    if not isinstance(workshop_id, int):
+        return jsonify({"error": "workshop_id requerido"}), 400
+    if not raw_number:
+        return jsonify({"error": "sticker_number requerido"}), 400
+
+    sticker_number = _norm_sticker_number(raw_number)
+
+    async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            existing = await conn.fetchrow(
+                """
+                SELECT s.id, s.status, so.workshop_id, c.id AS car_id
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c        ON c.sticker_id = s.id
+                WHERE s.sticker_number = $1
+                """,
+                sticker_number
+            )
+
+            sticker_id = None
+
+            if existing:
+                if existing["workshop_id"] != workshop_id:
+                    return jsonify({"error": "La oblea existe en otro taller, no puede asignarse aquí"}), 409
+
+                if existing["car_id"] is not None:
+                    return jsonify({"error": "La oblea ya está asignada a un auto en este taller"}), 409
+
+                if str(existing["status"]).strip().lower() != "disponible":
+                    return jsonify({"error": f"Oblea no disponible, estado actual: {existing['status']}"}), 409
+
+                sticker_id = existing["id"]
+
+            else:
+                if isinstance(forced_order_id, int):
+                    ok = await conn.fetchval(
+                        "SELECT 1 FROM sticker_orders WHERE id = $1 AND workshop_id = $2",
+                        forced_order_id, workshop_id
+                    )
+                    if not ok:
+                        return jsonify({"error": "sticker_order_id no pertenece a este taller"}), 400
+                    order_id = forced_order_id
+                else:
+                    order_id = await _get_or_create_manual_order(conn, workshop_id)
+
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO stickers (sticker_order_id, sticker_number, status, expiration_date)
+                    VALUES ($1, $2, 'Disponible', NULL)
+                    ON CONFLICT (sticker_number) DO NOTHING
+                    RETURNING id
+                    """,
+                    order_id, sticker_number
+                )
+
+                if not row:
+                    again = await conn.fetchrow(
+                        """
+                        SELECT s.id, s.status, so.workshop_id, c.id AS car_id
+                        FROM stickers s
+                        JOIN sticker_orders so ON so.id = s.sticker_order_id
+                        LEFT JOIN cars c        ON c.sticker_id = s.id
+                        WHERE s.sticker_number = $1
+                        """,
+                        sticker_number
+                    )
+                    if not again:
+                        return jsonify({"error": "No se pudo crear la oblea"}), 500
+                    if again["workshop_id"] != workshop_id:
+                        return jsonify({"error": "La oblea existe en otro taller, no puede asignarse aquí"}), 409
+                    if again["car_id"] is not None:
+                        return jsonify({"error": "La oblea ya está asignada a un auto en este taller"}), 409
+                    if str(again["status"]).strip().lower() != "disponible":
+                        return jsonify({"error": f"Oblea no disponible, estado actual: {again['status']}"}), 409
+                    sticker_id = again["id"]
+                else:
+                    sticker_id = row["id"]
+
+                await conn.execute(
+                    "UPDATE sticker_orders SET amount = COALESCE(amount, 0) + 1 WHERE id = $1",
+                    order_id
+                )
+
+            car_id = await conn.fetchval(
+                """
+                INSERT INTO cars (license_plate, sticker_id)
+                VALUES ($1, $2)
+                ON CONFLICT (license_plate) DO UPDATE
+                  SET sticker_id = EXCLUDED.sticker_id
+                RETURNING id
+                """,
+                license_plate, sticker_id
+            )
+
+            if mark_used:
+                await conn.execute("UPDATE stickers SET status = 'En Uso' WHERE id = $1", sticker_id)
+
+    return jsonify({
+        "ok": True,
+        "car_id": car_id,
+        "sticker_id": sticker_id,
+        "sticker_number": sticker_number
+    }), 200
