@@ -181,7 +181,7 @@ async def assign_sticker_to_car():
     license_plate = _norm_plate(data.get("license_plate"))
     sticker_id = data.get("sticker_id")
     workshop_id = data.get("workshop_id", None)
-    mark_used = bool(data.get("mark_used", True))
+    mark_used = True
 
     if not license_plate or not sticker_id:
         return jsonify({"error": "license_plate y sticker_id son requeridos"}), 400
@@ -512,12 +512,6 @@ async def get_sticker_order(order_id: int):
 
 @stickers_bp.route("/orders/<int:order_id>/add-stickers", methods=["POST"])
 async def add_stickers_to_order(order_id: int):
-    """
-    Agrega más stickers a una orden.
-    Body:
-      - stickers: [str], requerido
-      - expiration_date: "YYYY-MM-DD" o null, opcional, se aplica a estos nuevos
-    """
     data = await request.get_json(silent=True) or {}
     stickers = data.get("stickers") or []
     exp_raw = data.get("expiration_date", None)
@@ -631,7 +625,7 @@ async def assign_by_number():
     license_plate = _norm_plate(data.get("license_plate"))
     workshop_id = data.get("workshop_id")
     raw_number = data.get("sticker_number")
-    mark_used = bool(data.get("mark_used", True))
+    mark_used = True
     forced_order_id = data.get("sticker_order_id", None)
 
     if not license_plate:

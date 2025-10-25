@@ -4,20 +4,104 @@ from app.db import get_conn_ctx
 
 inspections_bp = Blueprint("inspections", __name__)
 
+# Estados válidos de cada paso
 ALLOWED_STEP_STATUS = {"Apto", "Condicional", "Rechazado"}
 
 
+# ---------------------------------------------------------------------------
+# Utils
+# ---------------------------------------------------------------------------
+
 def _norm_status(s: str | None) -> str | None:
+    """
+    Normaliza cosas tipo 'apto' -> 'Apto'
+    """
     if not s:
         return None
     s = str(s).strip()
     return s[:1].upper() + s[1:].lower()
 
 
+async def _get_workshop_for_inspection(conn, inspection_id: int) -> int | None:
+    """
+    Devuelve el workshop_id de la inspección.
+    Lo usamos para saber qué catálogo de observaciones aplica,
+    y también para validar que el paso pertenece al mismo taller.
+    """
+    return await conn.fetchval(
+        """
+        SELECT a.workshop_id
+        FROM inspections i
+        JOIN applications a ON a.id = i.application_id
+        WHERE i.id = $1
+        """,
+        inspection_id,
+    )
+
+
+async def _step_belongs_to_workshop(conn, step_id: int, workshop_id: int) -> bool:
+    """
+    Confirma que ese paso (step_id) exista para ese taller en steps_order.
+    """
+    return await conn.fetchval(
+        """
+        SELECT EXISTS (
+          SELECT 1
+          FROM steps_order so
+          WHERE so.workshop_id = $1
+            AND so.step_id = $2
+        )
+        """,
+        workshop_id,
+        step_id,
+    )
+
+
+async def _ensure_inspection_detail(conn, inspection_id: int, step_id: int) -> int:
+    """
+    Helper legacy:
+    Antes necesitábamos un inspection_details fila por paso para guardar
+    observaciones tildadas. El front nuevo NO usa esto ya,
+    pero lo dejamos para compatibilidad con flows viejos.
+    """
+    det_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM inspection_details
+        WHERE inspection_id = $1
+          AND step_id = $2
+        """,
+        inspection_id,
+        step_id
+    )
+    if det_id:
+        return det_id
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO inspection_details (inspection_id, step_id, status, observations)
+        VALUES ($1, $2, $3, NULL)
+        RETURNING id
+        """,
+        inspection_id,
+        step_id,
+        "Condicional"  # default legacy
+    )
+    return row["id"]
+
+
+# ---------------------------------------------------------------------------
+# 1. Crear inspección
+# ---------------------------------------------------------------------------
+
 @inspections_bp.route("/inspections", methods=["POST"])
 async def create_inspection():
+    """
+    Crea una inspección nueva para una application dada,
+    o devuelve la existente si ya había una.
+    También pone la app en estado "En curso".
+    """
     user_id = g.get("user_id")
-    print(user_id)
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
@@ -27,6 +111,7 @@ async def create_inspection():
         return jsonify({"error": "Falta application_id"}), 400
 
     async with get_conn_ctx() as conn:
+        # validar que exista la application
         app_row = await conn.fetchrow(
             "SELECT id FROM applications WHERE id = $1",
             int(app_id),
@@ -34,9 +119,10 @@ async def create_inspection():
         if not app_row:
             return jsonify({"error": "Application no encontrada"}), 404
 
+        # si ya hay inspección asociada, devolvemos esa
         existing = await conn.fetchrow(
             """
-            SELECT id, application_id, user_id
+            SELECT id
             FROM inspections
             WHERE application_id = $1
             ORDER BY id ASC
@@ -52,6 +138,7 @@ async def create_inspection():
                 }
             ), 200
 
+        # creamos una nueva
         row = await conn.fetchrow(
             """
             INSERT INTO inspections (application_id, user_id)
@@ -62,6 +149,7 @@ async def create_inspection():
             user_id,
         )
 
+        # marcamos la application "En curso"
         await conn.execute(
             "UPDATE applications SET status = $1 WHERE id = $2",
             "En curso",
@@ -74,10 +162,25 @@ async def create_inspection():
             "inspection_id": row["id"],
         }
     ), 201
-    
-    
+
+
+# ---------------------------------------------------------------------------
+# 2. Update inspección: global_observations (textarea grande) + opcional user_id
+# ---------------------------------------------------------------------------
+
 @inspections_bp.route("/inspections/<int:inspection_id>", methods=["PUT"])
 async def update_inspection(inspection_id: int):
+    """
+    Se usa para guardar:
+      - global_observations (texto final que ve el inspector en el textarea)
+      - opcionalmente reasignar user_id
+
+    Este endpoint se llama al apretar "Guardar" (junto con /details/bulk)
+    y también antes de generar el certificado.
+
+    Ya no persistimos las observaciones tildadas "por paso".
+    Eso vive solamente como texto dentro de global_observations.
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -87,17 +190,22 @@ async def update_inspection(inspection_id: int):
     values = []
     idx = 1
 
-    # opcional, seguir permitiendo cambiar el user_id
+    # permitir cambio de user_id explícito
     if "user_id" in data and data["user_id"] is not None:
         sets.append(f"user_id = ${idx}")
         values.append(data["user_id"])
         idx += 1
 
-    # nuevo, observaciones globales
+    # guardar el textarea combinado
     if "global_observations" in data:
         go = (data.get("global_observations") or "").strip()
-        if len(go) > 400:
-            return jsonify({"error": "Observaciones globales supera 400 caracteres"}), 400
+
+        # front usa límite 1200 chars; chequeamos acá también
+        if len(go) > 1200:
+            return jsonify(
+                {"error": "Observaciones globales supera 1200 caracteres"}
+            ), 400
+
         sets.append(f"global_observations = NULLIF(${idx}, '')")
         values.append(go)
         idx += 1
@@ -109,7 +217,8 @@ async def update_inspection(inspection_id: int):
 
     async with get_conn_ctx() as conn:
         exists = await conn.fetchval(
-            "SELECT 1 FROM inspections WHERE id = $1", inspection_id
+            "SELECT 1 FROM inspections WHERE id = $1",
+            inspection_id
         )
         if not exists:
             return jsonify({"error": "Inspección no encontrada"}), 404
@@ -122,25 +231,48 @@ async def update_inspection(inspection_id: int):
     return jsonify({"message": "Inspección actualizada"}), 200
 
 
+# ---------------------------------------------------------------------------
+# 3. Delete inspección
+# ---------------------------------------------------------------------------
 
 @inspections_bp.route("/inspections/<int:inspection_id>", methods=["DELETE"])
 async def delete_inspection(inspection_id: int):
+    """
+    Borra la inspección y lo asociado (inspection_details y observation_details legacy).
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
     async with get_conn_ctx() as conn:
         exists = await conn.fetchval(
-            "SELECT 1 FROM inspections WHERE id = $1", inspection_id
+            "SELECT 1 FROM inspections WHERE id = $1",
+            inspection_id
         )
         if not exists:
             return jsonify({"error": "Inspección no encontrada"}), 404
 
         async with conn.transaction():
+            # limpiamos observation_details de esos inspection_details
+            await conn.execute(
+                """
+                DELETE FROM observation_details
+                WHERE inspection_detail_id IN (
+                  SELECT id
+                  FROM inspection_details
+                  WHERE inspection_id = $1
+                )
+                """,
+                inspection_id,
+            )
+
+            # borramos inspection_details
             await conn.execute(
                 "DELETE FROM inspection_details WHERE inspection_id = $1",
                 inspection_id,
             )
+
+            # y la inspección
             await conn.execute(
                 "DELETE FROM inspections WHERE id = $1",
                 inspection_id,
@@ -149,35 +281,16 @@ async def delete_inspection(inspection_id: int):
     return jsonify({"message": "Inspección eliminada"}), 200
 
 
-async def _get_workshop_for_inspection(conn, inspection_id: int) -> int | None:
-    return await conn.fetchval(
-        """
-        SELECT a.workshop_id
-        FROM inspections i
-        JOIN applications a ON a.id = i.application_id
-        WHERE i.id = $1
-        """,
-        inspection_id,
-    )
-
-
-async def _step_belongs_to_workshop(conn, step_id: int, workshop_id: int) -> bool:
-    return await conn.fetchval(
-        """
-        SELECT EXISTS (
-          SELECT 1
-          FROM steps_order so
-          WHERE so.workshop_id = $1
-          AND so.step_id = $2
-        )
-        """,
-        workshop_id,
-        step_id,
-    )
-
+# ---------------------------------------------------------------------------
+# 4. Steps de la aplicación (para render de la pantalla)
+# ---------------------------------------------------------------------------
 
 @inspections_bp.route("/applications/<int:app_id>/steps", methods=["GET"])
 async def list_steps_for_application(app_id: int):
+    """
+    Devuelve pasos (steps) configurados para el taller de esa aplicación.
+    Esto alimenta la lista principal en el front.
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -192,7 +305,10 @@ async def list_steps_for_application(app_id: int):
 
         rows = await conn.fetch(
             """
-            SELECT s.id AS step_id, s.name, s.description, so.number AS order_index
+            SELECT s.id AS step_id,
+                   s.name,
+                   s.description,
+                   so.number AS order_index
             FROM steps_order so
             JOIN steps s ON s.id = so.step_id
             WHERE so.workshop_id = $1
@@ -201,83 +317,46 @@ async def list_steps_for_application(app_id: int):
             ws_id,
         )
 
-    return jsonify(
-        [
-            {
-                "step_id": r["step_id"],
-                "name": r["name"],
-                "description": r["description"],
-                "order": r["order_index"],
-            }
-            for r in rows
-        ]
-    ), 200
-
-
-@inspections_bp.route("/inspections/<int:inspection_id>/details", methods=["POST"])
-async def upsert_inspection_detail(inspection_id: int):
-    user_id = g.get("user_id")
-    if not user_id:
-        return jsonify({"error": "No autorizado"}), 401
-
-    data = await request.get_json() or {}
-    step_id = data.get("step_id")
-    status = _norm_status(data.get("status"))
-    observations = (data.get("observations") or "").strip()
-
-    if not step_id:
-        return jsonify({"error": "Falta step_id"}), 400
-    if status not in ALLOWED_STEP_STATUS:
-        return jsonify({"error": f"Estado inválido, use {', '.join(sorted(ALLOWED_STEP_STATUS))}"}), 400
-
-    async with get_conn_ctx() as conn:
-        ws_id = await _get_workshop_for_inspection(conn, inspection_id)
-        if not ws_id:
-            return jsonify({"error": "Inspección no encontrada"}), 404
-
-        belongs = await _step_belongs_to_workshop(conn, int(step_id), int(ws_id))
-        if not belongs:
-            return jsonify({"error": "El paso no corresponde al taller de la aplicación"}), 400
-
-        row = await conn.fetchrow(
-            """
-            INSERT INTO inspection_details (inspection_id, step_id, status, observations)
-            VALUES ($1, $2, $3, NULLIF($4, ''))
-            ON CONFLICT (inspection_id, step_id) DO UPDATE SET
-              status = EXCLUDED.status,
-              observations = COALESCE(NULLIF(EXCLUDED.observations, ''), inspection_details.observations)
-            RETURNING id, inspection_id, step_id, status, observations
-            """,
-            inspection_id,
-            int(step_id),
-            status,
-            observations,
-        )
-
-    return jsonify(
+    return jsonify([
         {
-            "message": "Detalle guardado",
-            "detail": {
-                "id": row["id"],
-                "inspection_id": row["inspection_id"],
-                "step_id": row["step_id"],
-                "status": row["status"],
-                "observations": row["observations"],
-            },
+            "step_id": r["step_id"],
+            "name": r["name"],
+            "description": r["description"],
+            "order": r["order_index"],
         }
-    ), 200
+        for r in rows
+    ]), 200
 
+
+# ---------------------------------------------------------------------------
+# 5. Guardar estados (Apto / Condicional / Rechazado) de TODOS los pasos
+# ---------------------------------------------------------------------------
 
 @inspections_bp.route("/inspections/<int:inspection_id>/details/bulk", methods=["POST"])
 async def bulk_upsert_inspection_details(inspection_id: int):
+    """
+    Guarda/actualiza el estado por paso (Apto/Condicional/Rechazado).
+    Body:
+      {
+        "items": [
+          { "step_id": 1, "status": "Apto", "observations": "" },
+          ...
+        ]
+      }
+
+    observations (campo string por paso) hoy lo mandamos "" desde el front nuevo;
+    el texto final está en global_observations a nivel inspección.
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
     payload = await request.get_json() or {}
     items = payload.get("items") or []
+
+    # Si no hay items, no tiramos 400 porque el front puede llamar igual.
     if not items:
-        return jsonify({"error": "No hay items para guardar."}), 400
+        return jsonify({"message": "Sin cambios"}), 200
 
     async with get_conn_ctx() as conn:
         ws_id = await _get_workshop_for_inspection(conn, inspection_id)
@@ -294,18 +373,32 @@ async def bulk_upsert_inspection_details(inspection_id: int):
                 if not step_id or status not in ALLOWED_STEP_STATUS:
                     raise ValueError("Datos de paso inválidos")
 
-                belongs = await _step_belongs_to_workshop(conn, int(step_id), int(ws_id))
+                # validar pertenencia del paso
+                belongs = await _step_belongs_to_workshop(
+                    conn, int(step_id), int(ws_id)
+                )
                 if not belongs:
-                    raise ValueError(f"El paso {step_id} no corresponde al taller")
+                    raise ValueError(
+                        f"El paso {step_id} no corresponde al taller"
+                    )
 
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO inspection_details (inspection_id, step_id, status, observations)
+                    INSERT INTO inspection_details
+                      (inspection_id, step_id, status, observations)
                     VALUES ($1, $2, $3, NULLIF($4, ''))
                     ON CONFLICT (inspection_id, step_id) DO UPDATE SET
                       status = EXCLUDED.status,
-                      observations = COALESCE(NULLIF(EXCLUDED.observations, ''), inspection_details.observations)
-                    RETURNING id, inspection_id, step_id, status, observations
+                      observations = COALESCE(
+                        NULLIF(EXCLUDED.observations, ''),
+                        inspection_details.observations
+                      )
+                    RETURNING
+                      id,
+                      inspection_id,
+                      step_id,
+                      status,
+                      observations
                     """,
                     inspection_id,
                     int(step_id),
@@ -325,8 +418,22 @@ async def bulk_upsert_inspection_details(inspection_id: int):
     return jsonify({"message": "Detalles guardados", "items": out}), 200
 
 
+# ---------------------------------------------------------------------------
+# 6. GET /inspections/:inspection_id/details
+#    (para ver estado general, certificado, PDF, etc.)
+# ---------------------------------------------------------------------------
+
 @inspections_bp.route("/inspections/<int:inspection_id>/details", methods=["GET"])
 async def list_inspection_details(inspection_id: int):
+    """
+    Devuelve:
+    - patente
+    - texto global guardado (global_observations)
+    - cada paso con status y observaciones por paso (legacy)
+
+    El front de edición no usa esto todo el tiempo, pero es útil
+    para vistas read-only / certificado.
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -336,7 +443,7 @@ async def list_inspection_details(inspection_id: int):
         if not ws_id:
             return jsonify({"error": "Inspección no encontrada"}), 404
 
-        # dominio del auto
+        # patente
         car_row = await conn.fetchrow(
             """
             SELECT c.license_plate
@@ -349,13 +456,14 @@ async def list_inspection_details(inspection_id: int):
         )
         license_plate = car_row["license_plate"] if car_row else None
 
-        # observación global
+        # observaciones globales (textarea final)
         global_row = await conn.fetchrow(
             "SELECT global_observations FROM inspections WHERE id = $1",
             inspection_id,
         )
         global_obs = global_row["global_observations"] if global_row else None
 
+        # estado de cada paso
         rows = await conn.fetch(
             """
             SELECT
@@ -365,31 +473,14 @@ async def list_inspection_details(inspection_id: int):
               s.description,
               d.id      AS detail_id,
               d.status,
-              d.observations AS detail_observations,
-              COALESCE(
-                json_agg(
-                  DISTINCT jsonb_build_object(
-                    'id',          o.id,
-                    'description', o.description,
-                    'checked',     (od.id IS NOT NULL)
-                  )
-                ) FILTER (WHERE o.id IS NOT NULL),
-                '[]'::json
-              ) AS obs_list
+              d.observations AS detail_observations
             FROM steps_order so
             JOIN steps s
               ON s.id = so.step_id
             LEFT JOIN inspection_details d
               ON d.step_id = s.id
              AND d.inspection_id = $1
-            LEFT JOIN observations o
-              ON o.step_id = s.id
-             AND o.workshop_id = $2
-            LEFT JOIN observation_details od
-              ON od.observation_id = o.id
-             AND od.inspection_detail_id = d.id
             WHERE so.workshop_id = $2
-            GROUP BY so.number, s.id, s.name, s.description, d.id, d.status, d.observations
             ORDER BY so.number ASC
             """,
             inspection_id,
@@ -397,7 +488,7 @@ async def list_inspection_details(inspection_id: int):
         )
 
     return jsonify({
-        "license_plate": license_plate,  # dominio del auto
+        "license_plate": license_plate,
         "global_observations": global_obs,
         "items": [
             {
@@ -414,37 +505,43 @@ async def list_inspection_details(inspection_id: int):
                     if r["detail_id"] is not None
                     else None
                 ),
-                "observations": r["obs_list"],
             }
             for r in rows
         ],
     }), 200
 
 
-async def _ensure_inspection_detail(conn, inspection_id: int, step_id: int) -> int:
-    det_id = await conn.fetchval(
-        """
-        SELECT id FROM inspection_details
-        WHERE inspection_id = $1 AND step_id = $2
-        """,
-        inspection_id, step_id
-    )
-    if det_id:
-        return det_id
-    # Si no existe, creamos el detalle con un status por defecto, por ejemplo "Condicional"
-    row = await conn.fetchrow(
-        """
-        INSERT INTO inspection_details (inspection_id, step_id, status, observations)
-        VALUES ($1, $2, $3, NULL)
-        RETURNING id
-        """,
-        inspection_id, step_id, "Condicional"
-    )
-    return row["id"]
+# ---------------------------------------------------------------------------
+# 7. Endpoints jerárquicos NUEVOS para el modal (2 niveles):
+#
+#   1) GET /inspections/:inspection_id/steps/:step_id/categories
+#        → lista las categorías disponibles para ese paso
+#
+#   2) GET /inspections/:inspection_id/steps/:step_id/categories/:category_id/observations
+#        → lista las observaciones finales (ítems hoja) de esa categoría
+#
+# IMPORTANTE:
+# - Ya NO usamos más subcategorías en el front (no hay tercer paso).
+# - Estos endpoints NO guardan nada, sólo devuelven catálogo.
+# ---------------------------------------------------------------------------
 
+@inspections_bp.route(
+    "/inspections/<int:inspection_id>/steps/<int:step_id>/categories",
+    methods=["GET"],
+)
+async def list_step_categories(inspection_id: int, step_id: int):
+    """
+    Primer nivel del modal.
 
-@inspections_bp.route("/inspections/<int:inspection_id>/steps/<int:step_id>/observations", methods=["GET"])
-async def list_step_observations(inspection_id: int, step_id: int):
+    Devuelve categorías que tengan al menos una observación activa
+    para este paso en este taller.
+
+    [
+      { "category_id": 100, "name": "Luces traseras" },
+      { "category_id": 101, "name": "Luces frontales" },
+      { "category_id": 102, "name": "Frenos" }
+    ]
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -454,39 +551,136 @@ async def list_step_observations(inspection_id: int, step_id: int):
         if not ws_id:
             return jsonify({"error": "Inspección no encontrada"}), 404
 
-        # Verifica que el step pertenezca al workshop
+        # validar que el paso pertenece al taller
         belongs = await _step_belongs_to_workshop(conn, step_id, ws_id)
         if not belongs:
-            return jsonify({"error": "El paso no corresponde al taller de la aplicación"}), 400
-
-        # Puede o no existir inspection_detail todavía
-        det_id = await conn.fetchval(
-            "SELECT id FROM inspection_details WHERE inspection_id = $1 AND step_id = $2",
-            inspection_id, step_id
-        )
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
 
         rows = await conn.fetch(
             """
-            SELECT
-              o.id,
-              o.description,
-              CASE WHEN od.id IS NULL THEN FALSE ELSE TRUE END AS checked
-            FROM observations o
-            LEFT JOIN observation_details od
-              ON od.observation_id = o.id
-             AND od.inspection_detail_id = $3
-            WHERE o.workshop_id = $1
-              AND o.step_id = $2
-            ORDER BY o.id
+            SELECT DISTINCT
+              oc.id   AS category_id,
+              oc.name AS category_name
+            FROM observation_categories oc
+            JOIN observation_subcategories osc
+              ON osc.category_id = oc.id
+            JOIN observations o
+              ON o.subcategory_id = osc.id
+            WHERE oc.workshop_id = $1
+              AND o.workshop_id  = $1
+              AND o.step_id      = $2
+              AND o.is_active    = TRUE
+            ORDER BY oc.name
             """,
-            ws_id, step_id, det_id
+            ws_id,
+            step_id,
         )
 
-    return jsonify([{"id": r["id"], "description": r["description"], "checked": r["checked"]} for r in rows]), 200
+    out = [
+        {
+            "category_id": r["category_id"],
+            "name": r["category_name"],
+        }
+        for r in rows
+    ]
+    return jsonify(out), 200
 
 
-@inspections_bp.route("/inspections/<int:inspection_id>/steps/<int:step_id>/observations/bulk", methods=["POST"])
+@inspections_bp.route(
+    "/inspections/<int:inspection_id>/steps/<int:step_id>/categories/<int:category_id>/observations",
+    methods=["GET"],
+)
+async def list_category_observations(
+    inspection_id: int,
+    step_id: int,
+    category_id: int
+):
+    """
+    Segundo (y último) nivel del modal.
+
+    Dada una categoría, devolvemos TODAS las observaciones finales activas
+    que estén debajo de ESA categoría para ESTE paso en ESTE taller,
+    sin pedir subcategoría intermedia.
+
+    Respuesta:
+    [
+      { "observation_id": 555, "description": "izquierda" },
+      { "observation_id": 556, "description": "derecha" },
+      { "observation_id": 557, "description": "pastilla gastada" }
+    ]
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        # de qué taller es esta inspección
+        ws_id = await _get_workshop_for_inspection(conn, inspection_id)
+        if not ws_id:
+            return jsonify({"error": "Inspección no encontrada"}), 404
+
+        # validamos que el paso pertenezca a ese taller
+        belongs = await _step_belongs_to_workshop(conn, step_id, ws_id)
+        if not belongs:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        # Traemos TODAS las observaciones activas para:
+        #   - ese workshop
+        #   - ese step
+        #   - cualquier subcategoría que cuelgue de esa categoría
+        rows = await conn.fetch(
+            """
+            SELECT
+              o.id          AS observation_id,
+              o.description AS observation_desc
+            FROM observation_categories oc
+            JOIN observation_subcategories osc
+              ON osc.category_id = oc.id
+            JOIN observations o
+              ON o.subcategory_id = osc.id
+            WHERE oc.id          = $1        -- la categoría elegida
+              AND oc.workshop_id = $2        -- mismo taller
+              AND o.workshop_id  = $2
+              AND o.step_id      = $3        -- mismo paso
+              AND o.is_active    = TRUE
+            ORDER BY o.sort_order NULLS LAST, o.id
+            """,
+            category_id,
+            ws_id,
+            step_id,
+        )
+
+    out = [
+        {
+            "observation_id": r["observation_id"],
+            "description": r["observation_desc"],
+        }
+        for r in rows
+    ]
+
+    return jsonify(out), 200
+
+
+# ---------------------------------------------------------------------------
+# 8. Legacy compat: bulk_set_step_observations
+# ---------------------------------------------------------------------------
+
+@inspections_bp.route(
+    "/inspections/<int:inspection_id>/steps/<int:step_id>/observations/bulk",
+    methods=["POST"],
+)
 async def bulk_set_step_observations(inspection_id: int, step_id: int):
+    """
+    LEGACY:
+    Antes guardábamos en observation_details cuáles observaciones estaban
+    tildadas en un paso.
+
+    El front NUEVO ya NO usa esto.
+    Lo dejamos por compatibilidad con flujos viejos.
+
+    Body:
+      { "checked_ids": [1,5,9] }
+    """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -503,29 +697,34 @@ async def bulk_set_step_observations(inspection_id: int, step_id: int):
 
         belongs = await _step_belongs_to_workshop(conn, step_id, ws_id)
         if not belongs:
-            return jsonify({"error": "El paso no corresponde al taller de la aplicación"}), 400
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
 
-        # Asegura que exista el inspection_detail
+        # aseguramos inspection_detail legacy
         det_id = await _ensure_inspection_detail(conn, inspection_id, step_id)
 
-        # Valida que las observations pertenezcan al taller y paso
+        # validar que las observation_ids existen y matchean step y taller
         if checked_ids:
-            valid_ids = await conn.fetch(
+            valid_rows = await conn.fetch(
                 """
-                SELECT id FROM observations
+                SELECT id
+                FROM observations
                 WHERE id = ANY($1::bigint[])
                   AND workshop_id = $2
                   AND step_id = $3
                 """,
-                checked_ids, ws_id, step_id
+                checked_ids,
+                ws_id,
+                step_id
             )
-            valid_set = {r["id"] for r in valid_ids}
+            valid_set = {r["id"] for r in valid_rows}
             invalid = [x for x in checked_ids if x not in valid_set]
             if invalid:
-                return jsonify({"error": f"Observaciones inválidas para el paso, ids: {invalid}"}), 400
+                return jsonify({
+                    "error": f"Observaciones inválidas para el paso, ids: {invalid}"
+                }), 400
 
         async with conn.transaction():
-            # Limpia los no seleccionados
+            # borramos las que NO quedaron seleccionadas
             if checked_ids:
                 await conn.execute(
                     """
@@ -533,24 +732,29 @@ async def bulk_set_step_observations(inspection_id: int, step_id: int):
                     WHERE inspection_detail_id = $1
                       AND observation_id <> ALL($2::bigint[])
                     """,
-                    det_id, checked_ids
+                    det_id,
+                    checked_ids
                 )
             else:
-                # Si nada marcado, borra todo
                 await conn.execute(
-                    "DELETE FROM observation_details WHERE inspection_detail_id = $1",
+                    """
+                    DELETE FROM observation_details
+                    WHERE inspection_detail_id = $1
+                    """,
                     det_id
                 )
 
-            # Inserta los seleccionados que falten
+            # insertamos las nuevas faltantes
             if checked_ids:
                 await conn.execute(
                     """
                     INSERT INTO observation_details (observation_id, inspection_detail_id)
-                    SELECT x, $1 FROM unnest($2::bigint[]) AS t(x)
+                    SELECT x, $1
+                    FROM unnest($2::bigint[]) AS t(x)
                     ON CONFLICT (observation_id, inspection_detail_id) DO NOTHING
                     """,
-                    det_id, checked_ids
+                    det_id,
+                    checked_ids
                 )
 
-    return jsonify({"message": "Observaciones guardadas"}), 200
+    return jsonify({"message": "Observaciones guardadas (legacy)"}), 200

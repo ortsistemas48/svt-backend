@@ -6,6 +6,8 @@ import json
 from app.email import send_workshop_pending_email, send_workshop_approved_email
 import logging
 import os
+import asyncio
+import re
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +23,494 @@ VALID_PROVINCES = {
     "Santa Fe","Santiago del Estero","Tierra del Fuego","Tucumán"
 }
 
+ # árbol completo de pasos -> subcategorías -> observaciones hoja
+DEFAULT_TREE = {
+    "Luces reglamentarias": {
+        "Luces no reglamentarias": [
+            "Adicional techo",
+            "Barra LED frontal",
+            "Faros auxiliares no permitidos",
+        ],
+        "Faltan luces de frenos": [
+            "Stop izquierdo",
+            "Stop derecho",
+            "Stop central",
+        ],
+        "Luces de giro fijas": [
+            "Giro delantero izquierdo fijo",
+            "Giro delantero derecho fijo",
+            "Giro trasero izquierdo fijo",
+            "Giro trasero derecho fijo",
+        ],
+        "Falta luz marcha atrás": [
+            "Marcha atrás izquierda",
+            "Marcha atrás derecha",
+        ],
+        "Retirar agregado de luces no reglamentarias": [
+            "Retirar faro auxiliar agregado",
+            "Retirar barra LED adicional",
+        ],
+        "Ajustar óptica": [
+            "Óptica delantera izquierda desalineada",
+            "Óptica delantera derecha desalineada",
+            "Óptica trasera desalineada",
+        ],
+        "Reparar / reemplazar óptica": [
+            "Mica rota",
+            "Soporte óptica suelto",
+            "Óptica quemada",
+        ],
+    },
+    "Sistema de dirección": {
+        "Reemplazar extremo de dirección": [
+            "Extremo izquierdo con juego",
+            "Extremo derecho con juego",
+        ],
+        "Reemplazar precap": [
+            "Precap lado izquierdo",
+            "Precap lado derecho",
+        ],
+        "Reemplazar / ajustar fuelle de precap": [
+            "Fuelle izquierdo dañado",
+            "Fuelle derecho dañado",
+        ],
+        "Realizar alineado delantero": [
+            "Eje delantero desalineado",
+        ],
+        "Pérdida de líquido hidráulico": [
+            "Caja de dirección con pérdida",
+            "Manguera hidráulica con pérdida",
+        ],
+    },
+    "Frenos": {
+        "Ajustar frenos delanteros": [
+            "Delantero izquierdo",
+            "Delantero derecho",
+        ],
+        "Ajustar frenos traseros": [
+            "Trasero izquierdo",
+            "Trasero derecho",
+        ],
+        "Ajustar freno de mano": [
+            "Palanca freno de mano",
+            "Cables tensores flojos",
+        ],
+        "Diferencia de freno delantero": [
+            "Izquierdo frena más que derecho",
+            "Derecho frena más que izquierdo",
+        ],
+        "Diferencia de freno trasero": [
+            "Izquierdo frena más que derecho",
+            "Derecho frena más que izquierdo",
+        ],
+        "Diferencia de freno de mano": [
+            "Lado izquierdo bajo",
+            "Lado derecho bajo",
+        ],
+        "Pérdida de líquido de freno en zona": [
+            "Bomba de freno con pérdida",
+            "Cilindro de rueda con pérdida",
+            "Flexible de freno fisurado",
+        ],
+        "Reemplazar cañerías de freno": [
+            "Cañería corroída",
+            "Flexible cuarteado",
+        ],
+        "Rectificar discos de freno": [
+            "Disco delantero izquierdo",
+            "Disco delantero derecho",
+        ],
+    },
+    "Sistema de suspensión": {
+        "Reemplazar amortiguador": [
+            "Amortiguador delantero izquierdo con pérdida",
+            "Amortiguador delantero derecho con pérdida",
+            "Amortiguador trasero con fuga",
+        ],
+        "Reemplazar cazoletas": [
+            "Cazoleta superior izquierda",
+            "Cazoleta superior derecha",
+        ],
+        "Reemplazar espiral": [
+            "Espiral delantero fatigado",
+            "Espiral trasero fatigado",
+        ],
+        "Reemplazar elástico": [
+            "Elástico trasero izquierdo",
+            "Elástico trasero derecho",
+        ],
+        "Ajustar anclajes de amortiguadores": [
+            "Tornillería floja delantera",
+            "Tornillería floja trasera",
+        ],
+        "Reemplazar bujes de parrilla": [
+            "Parrilla inferior izquierda con juego",
+            "Parrilla inferior derecha con juego",
+        ],
+        "Reemplazar rótula": [
+            "Rótula inferior izquierda",
+            "Rótula inferior derecha",
+        ],
+        "Reemplazar bujes de puente trasero": [
+            "Buje lado izquierdo desgastado",
+            "Buje lado derecho desgastado",
+        ],
+        "Reemplazar bujes de barra de torsión": [
+            "Buje barra estabilizadora izq.",
+            "Buje barra estabilizadora der.",
+        ],
+        "Reemplazar bieleta": [
+            "Bieleta izquierda con juego",
+            "Bieleta derecha con juego",
+        ],
+    },
+    "Bastidor y chasis": {
+        "Reparar zócalo": [
+            "Zócalo lateral izquierdo dañado",
+            "Zócalo lateral derecho dañado",
+        ],
+        "Reparar guardabarro": [
+            "Guardabarro delantero golpeado",
+            "Guardabarro trasero golpeado",
+        ],
+        "Retirar gancho de remolque": [
+            "Gancho delantero no reglamentario",
+            "Gancho trasero no reglamentario",
+        ],
+    },
+    "Llantas": {
+        "Reemplazar llanta": [
+            "Llanta delantera izquierda ovalada",
+            "Llanta delantera derecha golpeada",
+            "Llanta trasera deformada",
+        ],
+        "Falta bulón en rueda": [
+            "Rueda delantera izquierda",
+            "Rueda delantera derecha",
+            "Rueda trasera sin bulón",
+        ],
+        "Reemplazar rótula": [
+            "Rótula rueda del. izquierda con juego",
+            "Rótula rueda del. derecha con juego",
+        ],
+        "Reemplazar / ajustar rodamiento": [
+            "Rodamiento delantero izq. con ruido",
+            "Rodamiento delantero der. con juego",
+            "Rodamiento trasero con juego",
+        ],
+    },
+    "Neumáticos": {
+        "Reemplazar cubierta": [
+            "Cubierta delantera izquierda lisa",
+            "Cubierta delantera derecha lisa",
+            "Cubierta trasera desgastada",
+        ],
+        "Neumático no reglamentario": [
+            "Medida no permitida",
+            "Desgaste excesivo banda",
+        ],
+    },
+    "Carrocería": {
+        "Reemplazar parabrisas": [
+            "Parabrisas astillado",
+            "Parabrisas rajado en zona de visión",
+        ],
+        "Ajustar correctamente espejo retrovisor": [
+            "Espejo interior suelto",
+            "Espejo exterior flojo",
+        ],
+        "Reemplazar espejo retrovisor": [
+            "Espejo izquierdo faltante",
+            "Espejo derecho dañado",
+        ],
+        "Falta bocina": [
+            "Bocina inoperativa",
+            "Cableado bocina dañado",
+        ],
+        "Ajustar capot": [
+            "Cierre de capot desajustado",
+            "Bisagra capot floja",
+        ],
+        "Ajustar paragolpe delantero": [
+            "Paragolpe delantero suelto lado izq.",
+            "Paragolpe delantero suelto lado der.",
+        ],
+        "Ajustar paragolpe trasero": [
+            "Paragolpe trasero suelto lado izq.",
+            "Paragolpe trasero suelto lado der.",
+        ],
+        "Reparar apertura de puerta": [
+            "Puerta conductor no abre/cierra bien",
+            "Puerta acompañante no abre/cierra bien",
+            "Puerta trasera con traba",
+        ],
+        "Reparar apertura de ventanilla": [
+            "Levantavidrios conductor falla",
+            "Levantavidrios acompañante falla",
+        ],
+        "Sujetar correctamente portaequipaje de techo": [
+            "Portaequipaje flojo",
+            "Abrazaderas sin fijación",
+        ],
+        "Retirar butacas": [
+            "Butaca adicional trasera",
+            "Butaca no original",
+        ],
+        "Faltan apoyacabezas": [
+            "Apoyacabezas delantero faltante",
+            "Apoyacabezas trasero faltante",
+        ],
+        "Falta cinturón de seguridad": [
+            "Cinturón conductor faltante",
+            "Cinturón acompañante faltante",
+            "Cinturón trasero faltante",
+        ],
+        "Ajustar butaca": [
+            "Guías de butaca flojas",
+            "Anclaje de butaca flojo",
+        ],
+    },
+    "Accesorios reglamentarios": {
+        "Faltan elementos de seguridad": [
+            "Balizas faltantes",
+            "Botiquín incompleto",
+        ],
+        "Falta matafuego": [
+            "Sin matafuego a bordo",
+        ],
+        "Matafuego vencido": [
+            "Sin carga",
+            "Manómetro en rojo",
+        ],
+        "Pedir duplicado de patentes": [
+            "Patente delantera ilegible",
+            "Patente trasera ilegible",
+        ],
+    },
+    "Gases": {
+        "Exceso de gases": [
+            "CO/HC fuera de rango",
+        ],
+        "Exceso de opacidad de gases": [
+            "Humo negro excesivo",
+            "Humo azul excesivo",
+        ],
+    },
+    "Ruidos": {
+        "Reparar escape pinchado en zona": [
+            "Tramo intermedio pinchado",
+            "Tramo trasero pinchado",
+        ],
+        "Reparar / reemplazar precámara de escape": [
+            "Precámara fisurada",
+        ],
+        "Reparar / reemplazar silenciador de escape": [
+            "Silenciador trasero roto",
+        ],
+        "Reparar / reemplazar flexible de escape": [
+            "Flexible fisurado",
+        ],
+        "Colocar sujeción de escape en zona": [
+            "Abrazadera de escape floja",
+            "Soporte escape cortado",
+        ],
+        "Exceso de ruidos": [
+            "Escape libre / ruidoso",
+        ],
+        "Colocar silenciador de escape": [
+            "Falta silenciador final",
+        ],
+    },
+    "Otros elementos": {
+        "Reemplazar homocinética": [
+            "Homocinética lado izquierdo con juego",
+            "Homocinética lado derecho con juego",
+        ],
+        "Reemplazar fuelle de homocinética": [
+            "Fuelle lado izquierdo roto",
+            "Fuelle lado derecho roto",
+        ],
+        "Ajustar cardan": [
+            "Cruz cardan con juego",
+            "Soporte intermedio flojo",
+        ],
+        "Reemplazar taco de motor": [
+            "Taco delantero roto",
+            "Taco trasero roto",
+        ],
+        "Pérdida de aceite por motor": [
+            "Pérdida en cárter",
+            "Pérdida en tapa de válvulas",
+        ],
+        "Pérdida de líquido refrigerante": [
+            "Manguera de radiador con pérdida",
+            "Bomba de agua con pérdida",
+        ],
+    }
+}
+
+SUBCAT_NAME = "General"
+
+async def seed_workshop_observations(ws_id: int):
+    async with get_conn_ctx() as conn:
+        step_rows = await conn.fetch(
+            """
+            SELECT s.id, s.name
+            FROM steps_order so
+            JOIN steps s ON s.id = so.step_id
+            WHERE so.workshop_id = $1
+            ORDER BY so.number ASC
+            """,
+            ws_id,
+        )
+        step_name_to_id = {r["name"]: r["id"] for r in step_rows}
+
+        cat_names = set()
+        for step_name, cats in DEFAULT_TREE.items():
+            if step_name not in step_name_to_id:
+                continue
+            for cat_name in cats.keys():
+                cat_names.add(cat_name)
+
+        if not cat_names:
+            return
+
+        cat_names_list = sorted(cat_names)
+        ws_ids_arr = [ws_id] * len(cat_names_list)
+
+        inserted_cat_rows = await conn.fetch(
+            """
+            WITH incoming(ws_id, cat_name) AS (
+              SELECT UNNEST($1::bigint[]), UNNEST($2::text[])
+            )
+            INSERT INTO observation_categories (workshop_id, name)
+            SELECT i.ws_id, i.cat_name
+            FROM incoming i
+            LEFT JOIN observation_categories oc
+              ON oc.workshop_id = i.ws_id
+             AND oc.name        = i.cat_name
+            WHERE oc.id IS NULL
+            RETURNING id, name
+            """,
+            ws_ids_arr,
+            cat_names_list,
+        )
+
+        existing_cat_rows = await conn.fetch(
+            """
+            SELECT id, name
+            FROM observation_categories
+            WHERE workshop_id = $1
+              AND name = ANY($2::text[])
+            """,
+            ws_id,
+            cat_names_list,
+        )
+
+        cat_id_by_name = {}
+        for r in existing_cat_rows:
+            cat_id_by_name[r["name"]] = r["id"]
+        for r in inserted_cat_rows:
+            cat_id_by_name[r["name"]] = r["id"]
+
+        need_subcats_cat_ids = [cat_id_by_name[n] for n in cat_names_list]
+        need_subcats_names = [SUBCAT_NAME] * len(need_subcats_cat_ids)
+
+        await conn.execute(
+            """
+            WITH incoming(category_id, subcat_name) AS (
+              SELECT UNNEST($1::bigint[]), UNNEST($2::text[])
+            )
+            INSERT INTO observation_subcategories (category_id, name)
+            SELECT i.category_id, i.subcat_name
+            FROM incoming i
+            LEFT JOIN observation_subcategories osc
+              ON osc.category_id = i.category_id
+             AND osc.name        = i.subcat_name
+            WHERE osc.id IS NULL
+            """,
+            need_subcats_cat_ids,
+            need_subcats_names,
+        )
+
+        subcat_rows = await conn.fetch(
+            """
+            SELECT id, category_id
+            FROM observation_subcategories
+            WHERE category_id = ANY($1::bigint[])
+              AND name = $2
+            """,
+            need_subcats_cat_ids,
+            SUBCAT_NAME,
+        )
+        subcat_id_by_cat_id = {r["category_id"]: r["id"] for r in subcat_rows}
+
+        pending = []
+        for step_name, cats in DEFAULT_TREE.items():
+            step_id = step_name_to_id.get(step_name)
+            if not step_id:
+                continue
+            for cat_name, leaves in cats.items():
+                cat_id = cat_id_by_name.get(cat_name)
+                if not cat_id:
+                    continue
+                subcat_id = subcat_id_by_cat_id.get(cat_id)
+                if not subcat_id:
+                    continue
+                for idx, leaf in enumerate(leaves, start=1):
+                    pending.append((step_id, subcat_id, leaf, idx))
+
+        if not pending:
+            return
+
+        dedup = {}
+        for step_id, subcat_id, desc, sort_order in pending:
+            k = (step_id, desc)
+            if k in dedup:
+                continue
+            dedup[k] = (ws_id, step_id, subcat_id, desc, sort_order)
+
+        ws_arr = []
+        step_arr = []
+        subcat_arr = []
+        desc_arr = []
+        sort_arr = []
+        for (_, _), (w, st, sc, d, so) in dedup.items():
+            ws_arr.append(w)
+            step_arr.append(st)
+            subcat_arr.append(sc)
+            desc_arr.append(d)
+            sort_arr.append(so)
+
+        await conn.execute(
+            """
+            WITH incoming(ws_id, step_id, subcat_id, description, sort_order) AS (
+              SELECT
+                UNNEST($1::bigint[]),
+                UNNEST($2::int[]),
+                UNNEST($3::bigint[]),
+                UNNEST($4::text[]),
+                UNNEST($5::int[])
+            )
+            INSERT INTO observations (
+              workshop_id, step_id, subcategory_id, description, is_active, sort_order
+            )
+            SELECT i.ws_id, i.step_id, i.subcat_id, i.description, TRUE, i.sort_order
+            FROM incoming i
+            LEFT JOIN observations o
+              ON  o.workshop_id = i.ws_id
+              AND o.step_id     = i.step_id
+              AND o.description = i.description
+            WHERE o.id IS NULL
+            """,
+            ws_arr,
+            step_arr,
+            subcat_arr,
+            desc_arr,
+            sort_arr,
+        )
+
+
 def _clean_int_or_none(v, field_name: str):
     if v in (None, ""):
         return None
@@ -34,12 +524,11 @@ def _clean_int_or_none(v, field_name: str):
     
     
 async def _is_admin(conn, user_id: int) -> bool:
-    # ajustá según tu schema, por ejemplo users.is_admin boolean
     return await conn.fetchval(
         "SELECT COALESCE(is_admin, false) FROM users WHERE id = $1",
         user_id
     )
-
+ 
 @workshops_bp.route("/create-unapproved", methods=["POST"])
 async def create_workshop_unapproved():
     user_id = g.get("user_id")
@@ -68,7 +557,6 @@ async def create_workshop_unapproved():
     if not city:
         return jsonify({"error": "Falta la localidad"}), 400
 
-    import re
     digits_only = re.compile(r"\D+")
     cuit_norm = digits_only.sub("", cuit) if cuit else None
     if cuit_norm and len(cuit_norm) != 11:
@@ -79,119 +567,181 @@ async def create_workshop_unapproved():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    # datos para mail
     creator_email = None
     creator_name = None
 
+    # vamos a crear el taller y lo mínimo necesario
     async with get_conn_ctx() as conn:
         try:
             async with conn.transaction():
-                # obtener email del creador
+                # datos del usuario creador
                 urow = await conn.fetchrow(
                     "SELECT email, first_name, last_name FROM users WHERE id = $1",
                     user_id,
                 )
                 if urow:
                     creator_email = urow["email"]
-                    creator_name = urow["first_name"] + " " + urow["last_name"]
+                    creator_name = f"{urow['first_name']} {urow['last_name']}"
 
-                # detectar columnas
-                cols = await conn.fetch("""
-                    SELECT column_name FROM information_schema.columns
+                # chequeo columnas para address opcional
+                cols = await conn.fetch(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
                     WHERE table_name = 'workshop'
-                """)
+                    """
+                )
                 colset = {r["column_name"] for r in cols}
 
                 if "address" in colset:
                     row = await conn.fetchrow(
                         """
-                        INSERT INTO workshop (name, razon_social, province, city, address, phone, cuit, plant_number, disposition_number, is_approved)
+                        INSERT INTO workshop (
+                          name,
+                          razon_social,
+                          province,
+                          city,
+                          address,
+                          phone,
+                          cuit,
+                          plant_number,
+                          disposition_number,
+                          is_approved
+                        )
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false)
-                        RETURNING id, name, razon_social, province, city, address, phone, cuit, plant_number, disposition_number, is_approved
+                        RETURNING
+                          id,
+                          name,
+                          razon_social,
+                          province,
+                          city,
+                          address,
+                          phone,
+                          cuit,
+                          plant_number,
+                          disposition_number,
+                          is_approved
                         """,
-                        name, razon_social, province, city, address, phone, cuit_norm, plant_number, disposition_number
+                        name,
+                        razon_social,
+                        province,
+                        city,
+                        address,
+                        phone,
+                        cuit_norm,
+                        plant_number,
+                        disposition_number,
                     )
                 else:
                     row = await conn.fetchrow(
                         """
-                        INSERT INTO workshop (name, razon_social, province, city, phone, cuit, plant_number, disposition_number, is_approved)
+                        INSERT INTO workshop (
+                          name,
+                          razon_social,
+                          province,
+                          city,
+                          phone,
+                          cuit,
+                          plant_number,
+                          disposition_number,
+                          is_approved
+                        )
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false)
-                        RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number, is_approved
+                        RETURNING
+                          id,
+                          name,
+                          razon_social,
+                          province,
+                          city,
+                          phone,
+                          cuit,
+                          plant_number,
+                          disposition_number,
+                          is_approved
                         """,
-                        name, razon_social, province, city, phone, cuit_norm, plant_number, disposition_number
+                        name,
+                        razon_social,
+                        province,
+                        city,
+                        phone,
+                        cuit_norm,
+                        plant_number,
+                        disposition_number,
                     )
+
                 ws_id = row["id"]
 
-                # asignar OWNER al creador
+                # relacionar usuario como OWNER
                 await conn.execute(
                     """
                     INSERT INTO workshop_users (workshop_id, user_id, user_type_id)
                     VALUES ($1, $2, $3)
-                    ON CONFLICT (workshop_id, user_id) DO UPDATE SET user_type_id = EXCLUDED.user_type_id
+                    ON CONFLICT (workshop_id, user_id)
+                    DO UPDATE SET user_type_id = EXCLUDED.user_type_id
                     """,
-                    ws_id, user_id, OWNER_ROLE_ID
+                    ws_id,
+                    user_id,
+                    OWNER_ROLE_ID,
                 )
 
-                # inicializar steps y observaciones por defecto
-                steps = await conn.fetch("SELECT id, name FROM steps ORDER BY id ASC")
-                if not steps:
+                # steps_order para este taller
+                steps_rows = await conn.fetch(
+                    "SELECT id, name FROM steps ORDER BY id ASC"
+                )
+                if not steps_rows:
                     raise RuntimeError("No hay pasos base en la tabla steps")
 
-                for idx, s in enumerate(steps):
+                for idx, s in enumerate(steps_rows):
                     await conn.execute(
                         """
                         INSERT INTO steps_order (workshop_id, step_id, number)
                         VALUES ($1, $2, $3)
                         ON CONFLICT DO NOTHING
                         """,
-                        ws_id, s["id"], idx + 1
+                        ws_id,
+                        s["id"],
+                        idx + 1,
                     )
-                    defaults = [
-                        "Verificación visual",
-                        "Desgaste o grietas",
-                        "Fijaciones y holguras",
-                        "Funcionamiento general",
-                        "Medidas y tolerancias",
-                    ]
-                    for desc in defaults:
-                        await conn.execute(
-                            """
-                            INSERT INTO observations (workshop_id, step_id, description)
-                            SELECT $1, $2, $3
-                            WHERE NOT EXISTS (
-                              SELECT 1 FROM observations
-                              WHERE workshop_id = $1 AND step_id = $2 AND description = $3
-                            )
-                            """,
-                            ws_id, s["id"], desc
-                        )
 
         except UniqueViolationError as e:
-            msg = "Ya existe un workshop con ese nombre"
+            # por ejemplo: mismo CUIT
+            msg = "Ya existe un taller con ese nombre"
             if "workshop_cuit_uidx" in str(e):
-                msg = "Ya existe un workshop con ese CUIT"
+                msg = "Ya existe un taller con ese CUIT"
             return jsonify({"error": msg}), 409
         except RuntimeError as e:
             return jsonify({"error": str(e)}), 500
 
-    print('testing')
-    if creator_email:
-        print('testing2', creator_email)
-        try:
-            print('testing3')
-            review_url = f"{FRONTEND_URL}/select-workshop"
-            ok = await send_workshop_pending_email(
-                to_email=creator_email,
-                workshop_name=name,
-                review_url=review_url,
-            )
-            print("Email de taller pendiente encolado para %s, ok=%s", creator_email, ok)
-        except Exception as e:
-            print("No se pudo enviar email de taller pendiente a %s, error: %s", creator_email, e)
-    else:
-        print("No se envió email, creator_email es None para user_id=%s", user_id)
+    # hasta acá COMMIT hecho: el taller existe y el usuario es owner.
+    # disparamos el seed en background SIN esperar
+    asyncio.create_task(seed_workshop_observations(ws_id))
 
-    # respuesta
+    # fuego el mail "pendiente de aprobación"
+    if creator_email:
+        try:
+            review_url = f"{FRONTEND_URL}/select-workshop"
+            # lo hacemos en background-fire-and-forget también
+            asyncio.create_task(
+                send_workshop_pending_email(
+                    to_email=creator_email,
+                    workshop_name=name,
+                    review_url=review_url,
+                )
+            )
+        except Exception as e:
+            # si falla el schedule del mail no bloqueamos la respuesta
+            print(
+                "No se pudo encolar email de taller pendiente a %s, error: %s",
+                creator_email,
+                e,
+            )
+    else:
+        print(
+            "No se envió email, creator_email es None para user_id=%s",
+            user_id,
+        )
+
+    # armamos respuesta para el front
     out = {
         "id": row["id"],
         "name": row["name"],
@@ -207,16 +757,18 @@ async def create_workshop_unapproved():
     if "address" in row.keys():
         out["address"] = row["address"]
 
-    return jsonify({
-        "message": "Workshop creado en estado pendiente de aprobación",
-        "workshop": out,
-        "membership": {
-            "user_id": user_id,
-            "workshop_id": row["id"],
-            "user_type_id": OWNER_ROLE_ID
+    return jsonify(
+        {
+            "message": "Workshop creado en estado pendiente de aprobación",
+            "workshop": out,
+            "membership": {
+                "user_id": user_id,
+                "workshop_id": row["id"],
+                "user_type_id": OWNER_ROLE_ID,
+            },
         }
-    }), 201
-    
+    ), 201
+
     
 @workshops_bp.route("/<int:workshop_id>/approve", methods=["POST"])
 async def approve_workshop(workshop_id: int):
@@ -428,9 +980,9 @@ async def create_workshop():
                         )
 
         except UniqueViolationError as e:
-            msg = "Ya existe un workshop con ese nombre"
+            msg = "Ya existe un taller con ese nombre"
             if "workshop_cuit_uidx" in str(e):
-                msg = "Ya existe un workshop con ese CUIT"
+                msg = "Ya existe un taller con ese CUIT"
             return jsonify({"error": msg}), 409
 
     return jsonify({
@@ -516,7 +1068,7 @@ async def rename_workshop(workshop_id: int):
                 new_name, workshop_id,
             )
         except UniqueViolationError:
-            return jsonify({"error": "Ya existe un workshop con ese nombre"}), 409
+            return jsonify({"error": "Ya existe un taller con ese nombre"}), 409
 
     return jsonify({"message": "Nombre actualizado", "workshop": dict(row)}), 200
 
@@ -855,7 +1407,7 @@ async def update_workshop(workshop_id: int):
                 *vals, workshop_id
             )
         except UniqueViolationError:
-            return jsonify({"error": "Ya existe un workshop con ese nombre o CUIT"}), 409
+            return jsonify({"error": "Ya existe un taller con ese nombre o CUIT"}), 409
 
     return jsonify({"message": "Taller actualizado", "workshop": _camel_ws_row(row)}), 200
 
@@ -978,6 +1530,115 @@ async def save_steps_order(workshop_id: int):
 
     return jsonify({"message": "Orden de pasos guardado"}), 200
 
+
+@workshops_bp.route("/<int:workshop_id>/members/<uuid:member_user_id>/role", methods=["PUT", "OPTIONS"])
+async def set_member_role(workshop_id: int, member_user_id):
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    actor_id = g.get("user_id")
+    if not actor_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    role_name = (data.get("role") or "").strip()
+    role_id = data.get("user_type_id")
+
+    async with get_conn_ctx() as conn:
+        # Permisos, admin o OWNER del mismo taller
+        is_admin = await _is_admin(conn, actor_id)
+        if not is_admin:
+            # actor_id puede ser UUID en tu tabla, normalizo a str
+            belongs_as_owner = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                  SELECT 1 FROM workshop_users
+                  WHERE workshop_id = $1 AND user_id = $2::uuid AND user_type_id = $3
+                )
+                """,
+                workshop_id, str(actor_id), OWNER_ROLE_ID
+            )
+            if not belongs_as_owner:
+                return jsonify({"error": "Requiere admin o rol OWNER en este taller"}), 403
+
+        # Verificar que el usuario objetivo está asignado al taller
+        exists_target = await conn.fetchrow(
+            """
+            SELECT wu.user_type_id AS current_role
+            FROM workshop_users wu
+            WHERE wu.workshop_id = $1 AND wu.user_id = $2::uuid
+            """,
+            workshop_id, str(member_user_id)
+        )
+        if not exists_target:
+            return jsonify({"error": "Miembro no encontrado en este taller"}), 404
+
+        # Resolver role_id por nombre si llega "role"
+        if role_id is None:
+            if not role_name:
+                return jsonify({"error": "Falta role o user_type_id"}), 400
+            role_row = await conn.fetchrow(
+                "SELECT id FROM user_types WHERE LOWER(name) = LOWER($1)",
+                role_name
+            )
+            if not role_row:
+                return jsonify({"error": f"Rol inválido, no existe '{role_name}'"}), 400
+            role_id = role_row["id"]
+
+        # Evitar dejar al taller sin OWNER si estamos bajando al último OWNER
+        if exists_target["current_role"] == OWNER_ROLE_ID and role_id != OWNER_ROLE_ID:
+            is_last_owner = await conn.fetchval(
+                """
+                SELECT (SELECT COUNT(*) FROM workshop_users WHERE workshop_id = $1 AND user_type_id = $2) = 1
+                """,
+                workshop_id, OWNER_ROLE_ID
+            )
+            if is_last_owner:
+                return jsonify({"error": "No se puede cambiar el rol del único OWNER del taller"}), 400
+
+        # Guardar cambio y loguear
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE workshop_users
+                SET user_type_id = $3
+                WHERE workshop_id = $1 AND user_id = $2::uuid
+                """,
+                workshop_id, str(member_user_id), int(role_id)
+            )
+
+            meta = {
+                "ip": request.headers.get("X-Forwarded-For") or request.remote_addr,
+                "user_agent": request.headers.get("User-Agent"),
+                "reason": "set_member_role",
+                "new_role_id": int(role_id),
+                "new_role_name": role_name or None,
+            }
+            await conn.execute(
+                """
+                INSERT INTO workshop_user_logs
+                  (workshop_id, actor_user_id, target_user_id, target_prev_role, action, meta)
+                VALUES ($1, $2::uuid, $3::uuid, $4, 'SET_ROLE', $5::jsonb)
+                """,
+                workshop_id, str(actor_id), str(member_user_id), exists_target["current_role"], json.dumps(meta)
+            )
+
+    return jsonify({"ok": True, "workshop_id": workshop_id, "user_id": str(member_user_id), "user_type_id": int(role_id)}), 200
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ====== 5) Observaciones por paso ======
 
 # 5.1 Listar observaciones de un paso del taller
@@ -1080,7 +1741,6 @@ async def update_step_observation(workshop_id: int, step_id: int, obs_id: int):
         )
     return jsonify({"id": row["id"], "description": row["description"]}), 200
 
-# 5.4 Eliminar observación
 @workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/observations/<int:obs_id>", methods=["DELETE"])
 async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
     user_id = g.get("user_id")
@@ -1095,7 +1755,6 @@ async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
         if not ok:
             return jsonify({"error": "El paso no corresponde al taller"}), 400
 
-        # Limpia también vínculos con observation_details si existieran
         async with conn.transaction():
             await conn.execute(
                 """
@@ -1111,100 +1770,4 @@ async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
                 """,
                 obs_id, workshop_id, step_id
             )
-    # asyncpg devuelve "DELETE n", no hace falta retornar n exacto
     return jsonify({"message": "Observación eliminada"}), 200
-
-
-@workshops_bp.route("/<int:workshop_id>/members/<uuid:member_user_id>/role", methods=["PUT", "OPTIONS"])
-async def set_member_role(workshop_id: int, member_user_id):
-    if request.method == "OPTIONS":
-        return ("", 204)
-
-    actor_id = g.get("user_id")
-    if not actor_id:
-        return jsonify({"error": "No autorizado"}), 401
-
-    data = await request.get_json() or {}
-    role_name = (data.get("role") or "").strip()
-    role_id = data.get("user_type_id")
-
-    async with get_conn_ctx() as conn:
-        # Permisos, admin o OWNER del mismo taller
-        is_admin = await _is_admin(conn, actor_id)
-        if not is_admin:
-            # actor_id puede ser UUID en tu tabla, normalizo a str
-            belongs_as_owner = await conn.fetchval(
-                """
-                SELECT EXISTS(
-                  SELECT 1 FROM workshop_users
-                  WHERE workshop_id = $1 AND user_id = $2::uuid AND user_type_id = $3
-                )
-                """,
-                workshop_id, str(actor_id), OWNER_ROLE_ID
-            )
-            if not belongs_as_owner:
-                return jsonify({"error": "Requiere admin o rol OWNER en este taller"}), 403
-
-        # Verificar que el usuario objetivo está asignado al taller
-        exists_target = await conn.fetchrow(
-            """
-            SELECT wu.user_type_id AS current_role
-            FROM workshop_users wu
-            WHERE wu.workshop_id = $1 AND wu.user_id = $2::uuid
-            """,
-            workshop_id, str(member_user_id)
-        )
-        if not exists_target:
-            return jsonify({"error": "Miembro no encontrado en este taller"}), 404
-
-        # Resolver role_id por nombre si llega "role"
-        if role_id is None:
-            if not role_name:
-                return jsonify({"error": "Falta role o user_type_id"}), 400
-            role_row = await conn.fetchrow(
-                "SELECT id FROM user_types WHERE LOWER(name) = LOWER($1)",
-                role_name
-            )
-            if not role_row:
-                return jsonify({"error": f"Rol inválido, no existe '{role_name}'"}), 400
-            role_id = role_row["id"]
-
-        # Evitar dejar al taller sin OWNER si estamos bajando al último OWNER
-        if exists_target["current_role"] == OWNER_ROLE_ID and role_id != OWNER_ROLE_ID:
-            is_last_owner = await conn.fetchval(
-                """
-                SELECT (SELECT COUNT(*) FROM workshop_users WHERE workshop_id = $1 AND user_type_id = $2) = 1
-                """,
-                workshop_id, OWNER_ROLE_ID
-            )
-            if is_last_owner:
-                return jsonify({"error": "No se puede cambiar el rol del único OWNER del taller"}), 400
-
-        # Guardar cambio y loguear
-        async with conn.transaction():
-            await conn.execute(
-                """
-                UPDATE workshop_users
-                SET user_type_id = $3
-                WHERE workshop_id = $1 AND user_id = $2::uuid
-                """,
-                workshop_id, str(member_user_id), int(role_id)
-            )
-
-            meta = {
-                "ip": request.headers.get("X-Forwarded-For") or request.remote_addr,
-                "user_agent": request.headers.get("User-Agent"),
-                "reason": "set_member_role",
-                "new_role_id": int(role_id),
-                "new_role_name": role_name or None,
-            }
-            await conn.execute(
-                """
-                INSERT INTO workshop_user_logs
-                  (workshop_id, actor_user_id, target_user_id, target_prev_role, action, meta)
-                VALUES ($1, $2::uuid, $3::uuid, $4, 'SET_ROLE', $5::jsonb)
-                """,
-                workshop_id, str(actor_id), str(member_user_id), exists_target["current_role"], json.dumps(meta)
-            )
-
-    return jsonify({"ok": True, "workshop_id": workshop_id, "user_id": str(member_user_id), "user_type_id": int(role_id)}), 200
