@@ -23,6 +23,7 @@ async def get_vehicle_data(license_plate: str):
                 c.model,
                 c.fuel_type,
                 c.manufacture_year,
+                c.registration_year,
                 c.engine_brand,
                 c.engine_number,
                 c.chassis_number,
@@ -39,6 +40,7 @@ async def get_vehicle_data(license_plate: str):
                 c.total_weight,
                 c.front_weight,
                 c.back_weight,
+                c.license_class,
                 c.insurance,
                 -- Sticker (LEFT JOIN porque puede no existir)
                 s.id                  AS s_id,
@@ -85,6 +87,8 @@ async def get_vehicle_data(license_plate: str):
             "front_weight": row["front_weight"],
             "back_weight": row["back_weight"],
             "insurance": row["insurance"],
+            "licence_class": row["license_class"],
+            "registration_year": row["registration_year"]
         }
 
         # Serializar fechas del auto
