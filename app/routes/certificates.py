@@ -145,11 +145,10 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${documento2}": 0.50,
         "${localidad2}": 0.50,
         "${provincia2}": 0.50,
-        # observaciones un poco más grandes
-        "${observaciones}": 0.60,
+        "${observaciones}": 0.1,
     }
 
-    MIN_SIZE = 5.0
+    MIN_SIZE = 4.0
     MAX_SIZE = 28.0
 
     for page in doc:
@@ -497,14 +496,16 @@ async def certificates_generate_by_application(app_id: int):
 
     # 2) Globales, sí se envuelven a 80 caracteres
     global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
-    global_obs_wrapped = textwrap.fill(global_obs_text, width=80, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
+    global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
 
     # Combinado, pasos arriba sin wrap, luego una línea en blanco y las globales envueltas
-    if step_obs_text and global_obs_wrapped:
-        observaciones_text = f"{step_obs_text}\n\n{global_obs_wrapped}"
-    else:
-        observaciones_text = step_obs_text or global_obs_wrapped
-        
+    # if step_obs_text and global_obs_wrapped:
+    #     observaciones_text = f"{step_obs_text}\n\n{global_obs_wrapped}"
+    # else:
+    #     observaciones_text = step_obs_text or global_obs_wrapped
+    
+    observaciones_text = global_obs_wrapped
+
     oblea = str(row["sticker_number"] or "").strip()
     # qr_target = oblea if oblea else str(row["application_id"])
     qr_target = oblea

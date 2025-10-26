@@ -87,7 +87,7 @@ async def get_vehicle_data(license_plate: str):
             "front_weight": row["front_weight"],
             "back_weight": row["back_weight"],
             "insurance": row["insurance"],
-            "licence_class": row["license_class"],
+            "license_class": row["license_class"],
             "registration_year": row["registration_year"]
         }
 
