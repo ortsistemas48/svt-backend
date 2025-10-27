@@ -626,7 +626,7 @@ async def enqueue_application(app_id):
 
         await conn.execute(
             "UPDATE applications SET status = $1 WHERE id = $2",
-            "En Cola", app_id
+            "A Inspeccionar", app_id
         )
 
     return jsonify({"message": "Trámite enviado a la cola"}), 200
