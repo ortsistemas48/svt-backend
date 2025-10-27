@@ -415,7 +415,7 @@ async def get_application_full(id):
 
         # Documentos vinculados a la aplicación
         docs_rows = await conn.fetch("""
-            SELECT id, file_name, file_url, size_bytes, mime_type, role, created_at
+            SELECT id, file_name, file_url, size_bytes, mime_type, role, created_at, type
             FROM application_documents
             WHERE application_id = $1
             ORDER BY created_at DESC
@@ -432,6 +432,7 @@ async def get_application_full(id):
                 "size_bytes": r["size_bytes"],
                 "mime_type": r["mime_type"],
                 "role": r["role"],
+                "type": r["type"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             }
             documents.append(item)

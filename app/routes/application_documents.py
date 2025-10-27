@@ -7,10 +7,20 @@ import uuid
 
 docs_bp = Blueprint("application_documents", __name__)
 
-# ==== Supabase config dentro de ESTE archivo ====
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET_DOCS  = os.getenv("SUPABASE_BUCKET_DOCS", "certificados")
+
+MAX_FILE_MB = 20  # alineado con el front
+
+ALLOWED_CAR_typeS = {
+    "green_card_front",
+    "green_card_back",
+    "dni_front",
+    "dni_back",
+    "insurance_front",
+    "insurance_back",
+}
 
 def _get_supabase_client() -> Client:
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -21,11 +31,15 @@ def _public_url(bucket: str, path: str) -> str:
     base = (SUPABASE_URL or "").rstrip("/")
     return f"{base}/storage/v1/object/public/{bucket}/{path}"
 
-# ================================================
-
 def _norm_role(raw: str | None) -> str:
     r = (raw or "").strip().lower()
     return r if r in {"owner", "driver", "car", "generic"} else "generic"
+
+def _norm_type(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    t = raw.strip().lower()
+    return t if t in ALLOWED_CAR_typeS else None
 
 @docs_bp.route("/applications/<int:app_id>/documents", methods=["GET"])
 async def list_documents(app_id: int):
@@ -44,7 +58,7 @@ async def list_documents(app_id: int):
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(f"""
             SELECT id, application_id, file_name, bucket, object_path, file_url,
-                   size_bytes, mime_type, role, created_at
+                   size_bytes, mime_type, role, type AS type, created_at
             FROM application_documents
             WHERE application_id = $1{filter_sql}
             ORDER BY created_at DESC
@@ -57,8 +71,9 @@ async def list_documents(app_id: int):
 async def upload_documents(app_id: int):
     """
     multipart/form-data:
-      files: File[]  requerido
-      role:  owner, driver, car, generic  opcional, form o query
+      files:  File[]  requerido
+      role:   owner, driver, car, generic  opcional
+      types:  string[] paralelo a files, opcional, ej: dni_front, dni_back...
     """
     user_id = g.get("user_id")
     if not user_id:
@@ -78,20 +93,28 @@ async def upload_documents(app_id: int):
     if not files:
         return jsonify({"error": "No se recibieron archivos"}), 400
 
+    # types puede venir repetido, usar getlist
+    raw_types = form_data.getlist("types") if form_data else []
+    norm_types = [_norm_type(t) for t in raw_types]
+
     client = _get_supabase_client()
     saved = []
 
-    for f in files:
-        # leer bytes en modo síncrono
+    for idx, f in enumerate(files):
+        # leer bytes, en Werkzeug FileStorage .read() es sincrónico
         data = f.read()
         if not isinstance(data, (bytes, bytearray)):
-            return jsonify({"error": f"No se pudo leer el archivo {f.filename}"}), 400
+            return jsonify({"error": f"No se pudo leer el archivo {getattr(f, 'filename', '')}"}), 400
 
-        if len(data) > 15 * 1024 * 1024:
-            return jsonify({"error": f"El archivo {f.filename} excede 15MB"}), 413
+        if len(data) > MAX_FILE_MB * 1024 * 1024:
+            return jsonify({"error": f"El archivo {f.filename} excede {MAX_FILE_MB}MB"}), 413
 
-        safe_name = f.filename.replace("/", "_").replace("\\", "_")
-        dest = f"apps/{app_id}/{role}/{uuid.uuid4().hex}-{safe_name}"
+        safe_name = (f.filename or "file").replace("/", "_").replace("\\", "_")
+        type = norm_types[idx] if idx < len(norm_types) else None
+        type_segment = type or "untagged"
+
+        # incluimos role y type en la ruta para organizar
+        dest = f"apps/{app_id}/{role}/{type_segment}/{uuid.uuid4().hex}-{safe_name}"
 
         client.storage.from_(BUCKET_DOCS).upload(
             path=dest,
@@ -108,11 +131,11 @@ async def upload_documents(app_id: int):
             row = await conn.fetchrow("""
                 INSERT INTO application_documents
                   (application_id, file_name, bucket, object_path, file_url,
-                   size_bytes, mime_type, role)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                   size_bytes, mime_type, role, type)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id, application_id, file_name, bucket, object_path, file_url,
-                          size_bytes, mime_type, role, created_at
-            """, app_id, safe_name, BUCKET_DOCS, dest, file_url, len(data), f.mimetype, role)
+                          size_bytes, mime_type, role, type, created_at
+            """, app_id, safe_name, BUCKET_DOCS, dest, file_url, len(data), f.mimetype, role, type)
             saved.append(dict(row))
 
     return jsonify(saved), 201
