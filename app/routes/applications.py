@@ -1,6 +1,5 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
-import uuid
 import datetime
 from dateutil import parser
 import pytz
@@ -1083,3 +1082,4 @@ async def consume_slot(app_id: int):
                 "workshop_id": ws_row["id"],
                 "available_inspections": available - 1
             }), 200
+
