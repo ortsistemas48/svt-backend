@@ -415,6 +415,23 @@ async def bulk_upsert_inspection_details(inspection_id: int):
                     }
                 )
 
+            # Si hay 12 items, significa que todos los pasos están completados
+            # Actualizamos el estado de la aplicación a 'Emitir CRT'
+            
+            if (len(items) == 12):
+                await conn.execute(
+                        """
+                        UPDATE applications
+                        SET status = 'Emitir CRT'
+                        WHERE id = (
+                            SELECT application_id
+                            FROM inspections
+                            WHERE id = $1
+                        )
+                        """,
+                        inspection_id,
+                )
+
     return jsonify({"message": "Detalles guardados", "items": out}), 200
 
 
