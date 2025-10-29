@@ -212,7 +212,7 @@ async def add_or_update_car(app_id):
                 chassis_number, chassis_brand, green_card_number,
                 green_card_expiration, license_number, license_expiration,
                 vehicle_type, usage_type, owner_id, driver_id, insurance, sticker_id,
-                total_weight, front_weight, back_weight, registration_year, license_class
+                total_weight, front_weight, back_weight, registration_year, license_class, registration_month
                 )
                 VALUES (
                 $1, $2, $3, $4, $5,
@@ -220,7 +220,7 @@ async def add_or_update_car(app_id):
                 $9, $10, $11,
                 $12, $13, $14,
                 $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24, $25
+                $21, $22, $23, $24, $25, $26
                 )
                 ON CONFLICT (license_plate) DO UPDATE SET
                 brand = COALESCE(EXCLUDED.brand, cars.brand),
@@ -246,7 +246,8 @@ async def add_or_update_car(app_id):
                 front_weight = COALESCE(EXCLUDED.front_weight, cars.front_weight),
                 back_weight = COALESCE(EXCLUDED.back_weight, cars.back_weight),
                 registration_year = COALESCE(EXCLUDED.registration_year, cars.registration_year),
-                license_class = COALESCE(EXCLUDED.license_class, cars.license_class)
+                license_class = COALESCE(EXCLUDED.license_class, cars.license_class),
+                registration_month = COALESCE(EXCLUDED.registration_month, cars.registration_month)
                 RETURNING id
             """,
             license_plate, data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
@@ -254,7 +255,7 @@ async def add_or_update_car(app_id):
             data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
             green_card_expiration, data.get("license_number"), license_expiration, data.get("vehicle_type"), 
             data.get("usage_type"), owner_id, driver_id, data.get("insurance"), sticker_id, data.get("total_weight"),
-            data.get("front_weight"), data.get("back_weight"), data.get("registration_year"), data.get("license_class"))
+            data.get("front_weight"), data.get("back_weight"), data.get("registration_year"), data.get("license_class"), data.get("registration_month"))
 
             await conn.execute("""
                 UPDATE applications
@@ -364,9 +365,6 @@ async def get_application_full(id):
             row = await conn.fetchrow("""
                 SELECT
                   c.*,
-                  c.total_weight,
-                  c.front_weight,
-                  c.back_weight,
                   s.id               AS sticker__id,
                   s.sticker_number   AS sticker__sticker_number,
                   s.expiration_date  AS sticker__expiration_date,
