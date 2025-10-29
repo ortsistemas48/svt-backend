@@ -91,9 +91,6 @@ async def get_qr_data(sticker_number: str):
             "razon_social": row["razon_social"],
             "province": row["province"],
             "city": row["city"],
-            "province": row["province"],
-            "city": row["city"],
-            "address": row["address"],
             "address": row["address"],
         },
         "inspection": inspection
