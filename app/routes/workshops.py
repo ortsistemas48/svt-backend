@@ -1741,6 +1741,7 @@ async def update_step_observation(workshop_id: int, step_id: int, obs_id: int):
         )
     return jsonify({"id": row["id"], "description": row["description"]}), 200
 
+# 5.4 Eliminar observación
 @workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/observations/<int:obs_id>", methods=["DELETE"])
 async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
     user_id = g.get("user_id")
@@ -1771,3 +1772,12 @@ async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
                 obs_id, workshop_id, step_id
             )
     return jsonify({"message": "Observación eliminada"}), 200
+
+@workshops_bp.route("/get-all-workshops", methods=["GET"])
+async def get_all_workshops():
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch("SELECT id, name, province, city, phone, cuit, plant_number, disposition_number, razon_social, address, disposition_number, available_inspections FROM workshop where is_approved = true ORDER BY id ASC")
+
+    result = [{"id": r["id"], "name": r["name"], "province": r["province"], "city": r["city"], "phone": r["phone"], "cuit": r["cuit"], "plant_number": r["plant_number"], "disposition_number": r["disposition_number"], "razon_social": r["razon_social"], "address": r["address"], "available_inspections": r["available_inspections"]} for r in rows]
+
+    return jsonify({"workshops": result}), 200
