@@ -497,7 +497,7 @@ async def certificates_generate_by_application(app_id: int):
     # 2) Globales, sí se envuelven a 80 caracteres
     global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
     global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
-    global_obs_wrapped2 = textwrap.fill(global_obs_text, width=250, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
+    global_obs_wrapped2 = textwrap.fill(global_obs_text, width=90, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
 
     # Combinado, pasos arriba sin wrap, luego una línea en blanco y las globales envueltas
     # if step_obs_text and global_obs_wrapped:
