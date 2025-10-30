@@ -106,15 +106,17 @@ async def register():
             )
             user_id = user_row["id"]
 
-            # Relación workshop_users SIN user_type_id, sólo engineer_kind
+            # Relación workshop_users con user_type_id
             await conn.execute(
                 """
-                INSERT INTO workshop_users (workshop_id, user_id, engineer_kind, created_at)
-                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, engineer_kind, created_at)
+                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
                 ON CONFLICT (workshop_id, user_id)
-                DO UPDATE SET engineer_kind = EXCLUDED.engineer_kind
+                DO UPDATE SET 
+                    user_type_id = EXCLUDED.user_type_id,
+                    engineer_kind = EXCLUDED.engineer_kind
                 """,
-                workshop_id, user_id, engineer_kind
+                workshop_id, user_id, user_type_id, engineer_kind
             )
 
     # Emails fuera de la transacción
