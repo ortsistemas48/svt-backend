@@ -1773,6 +1773,367 @@ async def delete_step_observation(workshop_id: int, step_id: int, obs_id: int):
             )
     return jsonify({"message": "Observación eliminada"}), 200
 
+    
+# ====== 5.a) Categorías de observaciones por paso (workshop scope) ======
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories", methods=["GET"])
+async def list_step_categories(workshop_id: int, step_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        # Listar solo categorías (padres) que tienen observaciones (hijos) para ESTE paso
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT oc.id AS category_id, oc.name AS category_name
+            FROM observation_categories oc
+            JOIN observation_subcategories osc ON osc.category_id = oc.id
+            JOIN observations o              ON o.subcategory_id = osc.id
+            WHERE oc.workshop_id = $1
+              AND o.workshop_id  = $1
+              AND o.step_id      = $2
+            ORDER BY oc.name ASC
+            """,
+            workshop_id, step_id
+        )
+
+    return jsonify([{"category_id": r["category_id"], "name": r["category_name"]} for r in rows]), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories", methods=["POST"])
+async def create_step_category(workshop_id: int, step_id: int):
+    """
+    Crea una categoría para el taller (scope workshop). No está atada al paso,
+    pero se garantiza la existencia de la subcategoría "General" para poder
+    asociar observaciones del paso.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Falta name"}), 400
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        async with conn.transaction():
+            # Crear categoría si no existe
+            cat_row = await conn.fetchrow(
+                """
+                INSERT INTO observation_categories (workshop_id, name)
+                VALUES ($1, $2)
+                ON CONFLICT (workshop_id, name) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id, name
+                """,
+                workshop_id, name
+            )
+
+            # Garantizar subcategoría "General"
+            subcat_row = await conn.fetchrow(
+                """
+                INSERT INTO observation_subcategories (category_id, name)
+                VALUES ($1, $2)
+                ON CONFLICT (category_id, name) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+                """,
+                cat_row["id"], SUBCAT_NAME
+            )
+
+    return jsonify({"category_id": cat_row["id"], "name": cat_row["name"], "default_subcategory_id": subcat_row["id"]}), 201
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>", methods=["PUT", "PATCH"])
+async def rename_step_category(workshop_id: int, step_id: int, category_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Falta name"}), 400
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        exists = await conn.fetchval(
+            "SELECT 1 FROM observation_categories WHERE id = $1 AND workshop_id = $2",
+            category_id, workshop_id
+        )
+        if not exists:
+            return jsonify({"error": "Categoría no encontrada"}), 404
+
+        row = await conn.fetchrow(
+            """
+            UPDATE observation_categories
+            SET name = $1
+            WHERE id = $2 AND workshop_id = $3
+            RETURNING id, name
+            """,
+            name, category_id, workshop_id
+        )
+
+    return jsonify({"category_id": row["id"], "name": row["name"]}), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>", methods=["DELETE"])
+async def delete_step_category(workshop_id: int, step_id: int, category_id: int):
+    """
+    Elimina los hijos (observaciones) de esta categoría SOLO para el paso dado.
+    Si la categoría queda sin observaciones en todo el taller, también elimina
+    la categoría y sus subcategorías.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+
+        exists = await conn.fetchval(
+            "SELECT 1 FROM observation_categories WHERE id = $1 AND workshop_id = $2",
+            category_id, workshop_id
+        )
+        if not exists:
+            return jsonify({"error": "Categoría no encontrada"}), 404
+
+        async with conn.transaction():
+            # 1) Borrar detalles de observaciones (para los hijos del paso)
+            await conn.execute(
+                """
+                DELETE FROM observation_details
+                WHERE observation_id IN (
+                  SELECT o.id
+                  FROM observations o
+                  JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+                  WHERE osc.category_id = $1 AND o.workshop_id = $2 AND o.step_id = $3
+                )
+                """,
+                category_id, workshop_id, step_id
+            )
+
+            # 2) Borrar observaciones (hijos) para este paso
+            await conn.execute(
+                """
+                DELETE FROM observations
+                WHERE id IN (
+                  SELECT o.id
+                  FROM observations o
+                  JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+                  WHERE osc.category_id = $1 AND o.workshop_id = $2 AND o.step_id = $3
+                )
+                """,
+                category_id, workshop_id, step_id
+            )
+
+            # 3) ¿Quedaron observaciones en la categoría en otros pasos?
+            still_in_use = await conn.fetchval(
+                """
+                SELECT EXISTS(
+                  SELECT 1
+                  FROM observations o
+                  JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+                  WHERE osc.category_id = $1 AND o.workshop_id = $2
+                )
+                """,
+                category_id, workshop_id
+            )
+
+            category_deleted = False
+            if not still_in_use:
+                # 4) Si quedó vacía en todo el taller, eliminar subcategorías y la categoría
+                await conn.execute("DELETE FROM observation_subcategories WHERE category_id = $1", category_id)
+                await conn.execute("DELETE FROM observation_categories WHERE id = $1 AND workshop_id = $2", category_id, workshop_id)
+                category_deleted = True
+
+    return jsonify({"message": "Ok", "category_deleted": bool(category_deleted)}), 200
+
+
+# ====== 5.b) Observaciones (ítems) por categoría del paso ======
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>/observations", methods=["GET"])
+async def list_category_observations(workshop_id: int, step_id: int, category_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        rows = await conn.fetch(
+            """
+            SELECT o.id, o.description
+            FROM observations o
+            JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+            WHERE o.workshop_id = $1 AND o.step_id = $2 AND osc.category_id = $3
+            ORDER BY o.id ASC
+            """,
+            workshop_id, step_id, category_id
+        )
+
+    return jsonify([{"id": r["id"], "description": r["description"]} for r in rows]), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>/observations", methods=["POST"])
+async def create_category_observation(workshop_id: int, step_id: int, category_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    desc = (data.get("description") or "").strip()
+    if not desc:
+        return jsonify({"error": "Falta description"}), 400
+    if len(desc) > 300:
+        return jsonify({"error": "La descripción no puede superar 300 caracteres"}), 400
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        # Garantizar subcategoría General
+        subcat = await conn.fetchrow(
+            "SELECT id FROM observation_subcategories WHERE category_id = $1 AND name = $2",
+            category_id, SUBCAT_NAME
+        )
+        if not subcat:
+            subcat = await conn.fetchrow(
+                """
+                INSERT INTO observation_subcategories (category_id, name)
+                VALUES ($1, $2)
+                RETURNING id
+                """,
+                category_id, SUBCAT_NAME
+            )
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO observations (workshop_id, step_id, subcategory_id, description)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, description
+            """,
+            workshop_id, step_id, subcat["id"], desc
+        )
+
+    return jsonify({"id": row["id"], "description": row["description"]}), 201
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>/observations/<int:obs_id>", methods=["PUT", "PATCH"])
+async def update_category_observation(workshop_id: int, step_id: int, category_id: int, obs_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    desc = (data.get("description") or "").strip()
+    if not desc:
+        return jsonify({"error": "Falta description"}), 400
+    if len(desc) > 300:
+        return jsonify({"error": "La descripción no puede superar 300 caracteres"}), 400
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        # Validar que el obs pertenezca a la categoría
+        exists = await conn.fetchval(
+            """
+            SELECT 1
+            FROM observations o
+            JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+            WHERE o.id = $1 AND o.workshop_id = $2 AND o.step_id = $3 AND osc.category_id = $4
+            """,
+            obs_id, workshop_id, step_id, category_id
+        )
+        if not exists:
+            return jsonify({"error": "Observación no encontrada en la categoría"}), 404
+
+        row = await conn.fetchrow(
+            """
+            UPDATE observations
+            SET description = $1
+            WHERE id = $2
+            RETURNING id, description
+            """,
+            desc, obs_id
+        )
+
+    return jsonify({"id": row["id"], "description": row["description"]}), 200
+
+
+@workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories/<int:category_id>/observations/<int:obs_id>", methods=["DELETE"])
+async def delete_category_observation(workshop_id: int, step_id: int, category_id: int, obs_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        belongs = await _user_belongs_to_workshop(conn, user_id, workshop_id)
+        if not belongs:
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        ok = await _step_belongs_to_workshop(conn, step_id, workshop_id)
+        if not ok:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        # Validar pertenencia a la categoría
+        exists = await conn.fetchval(
+            """
+            SELECT 1
+            FROM observations o
+            JOIN observation_subcategories osc ON osc.id = o.subcategory_id
+            WHERE o.id = $1 AND o.workshop_id = $2 AND o.step_id = $3 AND osc.category_id = $4
+            """,
+            obs_id, workshop_id, step_id, category_id
+        )
+        if not exists:
+            return jsonify({"error": "Observación no encontrada en la categoría"}), 404
+
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM observation_details WHERE observation_id = $1",
+                obs_id
+            )
+            await conn.execute(
+                "DELETE FROM observations WHERE id = $1",
+                obs_id
+            )
+
+    return jsonify({"message": "Observación eliminada"}), 200
+
 @workshops_bp.route("/get-all-workshops", methods=["GET"])
 async def get_all_workshops():
     async with get_conn_ctx() as conn:
