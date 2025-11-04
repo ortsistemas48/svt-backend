@@ -16,8 +16,8 @@ MAX_FILE_MB = 20  # alineado con el front
 ALLOWED_CAR_typeS = {
     "green_card_front",
     "green_card_back",
-    "dni_front",
-    "dni_back",
+    "license_front",
+    "license_back",
     "insurance_front",
     "insurance_back",
 }
