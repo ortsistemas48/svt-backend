@@ -533,6 +533,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 a.user_id,
                 a.date,
                 a.status,
+                a.result,
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
@@ -560,6 +561,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             "user_id": r["user_id"],
             "date": r["date"].isoformat() if r["date"] else None,
             "status": r["status"],
+            "result": r["result"],
             "owner": (
                 {
                     "first_name": r["owner_first_name"],

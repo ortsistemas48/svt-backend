@@ -4,6 +4,7 @@ from app.db import get_conn_ctx
 from supabase import create_client, Client
 import os
 import uuid
+import re, unicodedata
 
 inspection_docs_bp = Blueprint("inspection_documents", __name__)
 
@@ -112,7 +113,9 @@ async def upload_inspection_documents(inspection_id: int):
         if len(data) > 15 * 1024 * 1024:
             return jsonify({"error": f"El archivo {f.filename} excede 15MB"}), 413
 
-        safe_name = f.filename.replace("/", "_").replace("\\", "_")
+        safe_name = unicodedata.normalize("NFD", (f.filename or "file")).encode("ascii", "ignore").decode("ascii")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", safe_name).strip("-.")
+
         # ruta en el bucket algo como: inspections/<inspection_id>/<role or step>/<uuid>-<file>
         subfolder = f"step-{step_id}" if (role == "step" and step_id is not None) else role
         dest = f"inspections/{inspection_id}/{subfolder}/{uuid.uuid4().hex}-{safe_name}"

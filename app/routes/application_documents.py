@@ -4,6 +4,7 @@ from app.db import get_conn_ctx
 from supabase import create_client, Client
 import os
 import uuid
+import re, unicodedata
 
 docs_bp = Blueprint("application_documents", __name__)
 
@@ -109,7 +110,9 @@ async def upload_documents(app_id: int):
         if len(data) > MAX_FILE_MB * 1024 * 1024:
             return jsonify({"error": f"El archivo {f.filename} excede {MAX_FILE_MB}MB"}), 413
 
-        safe_name = (f.filename or "file").replace("/", "_").replace("\\", "_")
+        safe_name = unicodedata.normalize("NFD", (f.filename or "file")).encode("ascii", "ignore").decode("ascii")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", safe_name).strip("-.")
+
         type = norm_types[idx] if idx < len(norm_types) else None
         type_segment = type or "untagged"
 
