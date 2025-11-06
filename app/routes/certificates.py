@@ -12,6 +12,9 @@ import pytz
 from supabase import create_client, Client
 import textwrap
 from fitz import PDF_REDACT_IMAGE_NONE, PDF_REDACT_LINE_ART_NONE, PDF_REDACT_TEXT_REMOVE
+import asyncio
+
+from app.jobs import new_job, get_job, run_job
 
 certificates_bp = Blueprint("certificates", __name__)
 
@@ -23,26 +26,17 @@ BUCKET_CERTS = os.getenv("SUPABASE_BUCKET_CERTS", "certificados")
 def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
     s = base_size
     n = len(value or "")
-
     if ph in ("${domicilio}", "${modelo}"):
-        if n <= 20:
-            factor = 1.00
-        elif n <= 30:
-            factor = 0.85
-        elif n <= 40:
-            factor = 0.75
-        elif n <= 50:
-            factor = 0.65
-        else:
-            factor = 0.55
+        if n <= 20: factor = 1.00
+        elif n <= 30: factor = 0.85
+        elif n <= 40: factor = 0.75
+        elif n <= 50: factor = 0.65
+        else: factor = 0.55
         s *= factor
-
     if ph == "${numero_motor}":
         s *= 0.85
-        
     if ph == "${numero_chasis}":
         s *= 0.85
-
     return s
 
 def _add_transparent_redaction(page: fitz.Page, rect: fitz.Rect):
@@ -138,7 +132,6 @@ def _to_upper(val) -> str:
 
 def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None):
     total_counts = {k: 0 for k in mapping.keys()}
-
     SIZE_MULTIPLIER = {
         "${fecha_em}": 0.75,
         "${nombre_apellido2}": 0.50,
@@ -147,7 +140,6 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${provincia2}": 0.50,
         "${observaciones}": 0.1,
     }
-
     MIN_SIZE = 4.0
     MAX_SIZE = 28.0
 
@@ -168,9 +160,9 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 
         if page_matches or qr_matches:
             page.apply_redactions(
-                images=PDF_REDACT_IMAGE_NONE,        # no tocar píxeles de imágenes
-                graphics=PDF_REDACT_LINE_ART_NONE,   # no borrar vectores solapados
-                text=PDF_REDACT_TEXT_REMOVE          # eliminar solo el texto
+                images=PDF_REDACT_IMAGE_NONE,
+                graphics=PDF_REDACT_LINE_ART_NONE,
+                text=PDF_REDACT_TEXT_REMOVE
             )
 
         for ph, ms in page_matches.items():
@@ -184,7 +176,6 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 
                 base_size = float(m["size"])
                 mult = SIZE_MULTIPLIER.get(ph, 1.0)
-                
                 size = max(MIN_SIZE, min(MAX_SIZE, base_size * mult))
                 size = _adjust_font_size_by_length(ph, size, val)
                 size = max(MIN_SIZE, min(MAX_SIZE, size))
@@ -199,20 +190,11 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                 try:
                     if is_crt and is_vertical_slot:
                         placed = page.insert_textbox(
-                            padded, val or "",
-                            fontname=fontname,
-                            fontsize=size,
-                            align=1,
-                            rotate=90,
-                            opacity=1.0
+                            padded, val or "", fontname=fontname, fontsize=size, align=1, rotate=90, opacity=1.0
                         )
                     else:
                         placed = page.insert_textbox(
-                            padded, val or "",
-                            fontname=fontname,
-                            fontsize=size,
-                            align=0,
-                            opacity=1.0
+                            padded, val or "", fontname=fontname, fontsize=size, align=0, opacity=1.0
                         )
                 except Exception:
                     placed = 0
@@ -324,7 +306,6 @@ def _usage_type_display(code: str | None) -> str:
     return f"{c} - {label}" if label else c
 
 def _wrap_to_width(text: str, width: int = 35) -> str:
-    """Envuelve cada línea del texto a un ancho fijo en caracteres."""
     lines = []
     for part in (text or "").splitlines():
         if not part:
@@ -334,10 +315,27 @@ def _wrap_to_width(text: str, width: int = 35) -> str:
         lines.extend(wrapped if wrapped else [""])
     return "\n".join(lines)
 
-# ---------- endpoint ----------
+# ---------- NUEVO: endpoint async que dispara job y responde 202 ----------
 @certificates_bp.route("/certificates/application/<int:app_id>/generate", methods=["POST"])
 async def certificates_generate_by_application(app_id: int):
     payload = await request.get_json() or {}
+    job_id = new_job()
+
+    async def work():
+        return await _do_generate_certificate(app_id, payload)
+
+    asyncio.create_task(run_job(work(), job_id))
+    return jsonify({"message": "En proceso", "job_id": job_id}), 202
+
+@certificates_bp.route("/certificates/job/<job_id>", methods=["GET"])
+async def certificates_job_status(job_id: str):
+    j = get_job(job_id)
+    if not j:
+        return jsonify({"error": "job_id no encontrado"}), 404
+    return jsonify(j), 200
+
+# ---------- LÓGICA DE GENERACIÓN MOVIDA A FUNCIÓN REUTILIZABLE ----------
+async def _do_generate_certificate(app_id: int, payload: dict):
     condicion_raw = (payload.get("condicion") or "Apto").strip().lower()
     cond_map = {"apto": "Apto", "condicional": "Condicional", "rechazado": "Rechazado"}
     condicion = cond_map.get(condicion_raw, "Apto")
@@ -349,12 +347,13 @@ async def certificates_generate_by_application(app_id: int):
     }
     template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
+    # descarga del template, bloqueante pero dentro del job, si querés pasar a httpx async mejor
     try:
         t_resp = requests.get(template_url, timeout=20)
         t_resp.raise_for_status()
         template_bytes = t_resp.content
     except Exception as e:
-        return jsonify({"error": f"No se pudo descargar el template, {e}"}), 502
+        raise RuntimeError(f"No se pudo descargar el template, {e}")
 
     async with get_conn_ctx() as conn:
         row = await conn.fetchrow(
@@ -405,7 +404,7 @@ async def certificates_generate_by_application(app_id: int):
             app_id
         )
         if not row:
-            return jsonify({"error": "Trámite no encontrado"}), 404
+            raise RuntimeError("Trámite no encontrado")
 
         insp = await conn.fetchrow(
             """
@@ -453,10 +452,7 @@ async def certificates_generate_by_application(app_id: int):
 
     resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
 
-    # Mostrar value puro en ${tipo_vehiculo}
     tipo_puro = (row["vehicle_type"] or "").strip().upper()
-
-    # Clasificación, value - label en 2 líneas, envuelto a 35 caracteres
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
     uso_display = _usage_type_display((row["usage_type"] or "").strip())
     clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
@@ -466,8 +462,6 @@ async def certificates_generate_by_application(app_id: int):
     current_year_ar = datetime.now(argentina_tz).year
     crt_numero = f"{row['application_id']}/{current_year_ar}"
 
-    # Observaciones
-    # 1) Por pasos, en una sola línea por paso, observaciones separadas por comas, sin envolver
     step_groups = {}
     for r in step_obs_rows or []:
         step_name = (r["step_name"] or "").strip()
@@ -477,7 +471,6 @@ async def certificates_generate_by_application(app_id: int):
         step_groups.setdefault(step_name, []).append(desc) if desc else step_groups.setdefault(step_name, [])
 
     step_lines = []
-    # orden por el order ya vino en la query, preservamos agregando en ese orden
     seen = set()
     for r in step_obs_rows or []:
         name = (r["step_name"] or "").strip()
@@ -494,22 +487,13 @@ async def certificates_generate_by_application(app_id: int):
                 step_lines.append(f"{name}:")
     step_obs_text = "\n".join(step_lines).strip()
 
-    # 2) Globales, sí se envuelven a 80 caracteres
     global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
     global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
     global_obs_wrapped2 = textwrap.fill(global_obs_text, width=90, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
-
-    # Combinado, pasos arriba sin wrap, luego una línea en blanco y las globales envueltas
-    # if step_obs_text and global_obs_wrapped:
-    #     observaciones_text = f"{step_obs_text}\n\n{global_obs_wrapped}"
-    # else:
-    #     observaciones_text = step_obs_text or global_obs_wrapped
-    
     observaciones_text = global_obs_wrapped
     observaciones_text2 = global_obs_wrapped2
 
     oblea = str(row["sticker_number"] or "").strip()
-    # qr_target = oblea if oblea else str(row["application_id"])
     qr_target = oblea
     qr_link = f"https://www.checkrto.com/qr/{qr_target}"
     oblea_text = oblea if oblea else "Sin Asignar"
@@ -522,7 +506,7 @@ async def certificates_generate_by_application(app_id: int):
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      f"{owner_fullname} (D.N.I. {str(documento)}) - TITULAR" or "",
+        "${nombre_apellido2}":      f"{owner_fullname} (D.N.I. {str(documento)}) , TITULAR" or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
@@ -546,32 +530,28 @@ async def certificates_generate_by_application(app_id: int):
         "${clasif}":                clasificacion,
         "${resultado2}":            "",
         "${crt_numero}":            crt_numero,
-        "${oblea_numero}":          oblea_text, 
+        "${oblea_numero}":          oblea_text,
     }
 
+    # abrir, reemplazar, guardar
     try:
         doc = fitz.open(stream=template_bytes, filetype="pdf")
     except Exception as e:
-        return jsonify({"error": f"No se pudo abrir el template PDF, {e}"}), 500
-    
+        raise RuntimeError(f"No se pudo abrir el template PDF, {e}")
 
-    # qr_link = f"https://www.checkrto.com/qr/{oblea}"
     qr_png = _make_qr_bytes(qr_link)
-
     counts = _replace_placeholders_transparente(doc, mapping, qr_png)
-
     out_buf = io.BytesIO()
     doc.save(out_buf, garbage=4, deflate=True)
     doc.close()
     pdf_bytes = out_buf.getvalue()
 
-    output_name = payload.get("output_name") or "certificado.pdf"
     storage_path = f"certificados/{app_id}/certificado.pdf"
-
     try:
         public_url = _upload_pdf_and_get_public_url(pdf_bytes, storage_path)
     except Exception as e:
-        return jsonify({"error": f"No se pudo subir a Supabase Storage, {e}"}), 502
+        # subido como error 207 en tu versión, acá dejamos el job en done con warning si preferís
+        raise RuntimeError(f"PDF generado, no se pudo subir a Supabase Storage, {e}")
 
     try:
         async with get_conn_ctx() as conn:
@@ -587,17 +567,11 @@ async def certificates_generate_by_application(app_id: int):
                 app_id,
             )
     except Exception as e:
-        return jsonify({
-            "error": f"PDF generado, no se pudo actualizar el estado del trámite, {e}",
-            "application_id": app_id,
-            "template_url": template_url,
-            "storage_bucket": BUCKET_CERTS,
-            "storage_path": storage_path,
-            "public_url": public_url,
-            "replacements": counts
-        }), 207
+        # si querés tolerar esto como 207, podés no levantar excepción y devolver la data con un flag
+        raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
 
-    return jsonify({
+    # devolver dict final para el job
+    return {
         "message": "PDF generado y trámite actualizado",
         "application_id": app_id,
         "new_status": "Completado",
@@ -607,4 +581,4 @@ async def certificates_generate_by_application(app_id: int):
         "storage_path": storage_path,
         "public_url": public_url,
         "replacements": counts
-    }), 200
+    }
