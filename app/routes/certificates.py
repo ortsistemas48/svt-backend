@@ -408,7 +408,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
         insp = await conn.fetchrow(
             """
-            SELECT i.id, i.global_observations
+            SELECT i.id, i.global_observations, COALESCE(i.is_second, FALSE) AS is_second
             FROM inspections i
             WHERE i.application_id = $1
             ORDER BY i.id DESC
@@ -438,6 +438,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 insp["id"],
                 row["workshop_id"],
             )
+
+    is_second_inspection = bool(insp and insp.get("is_second"))
 
     owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
     documento = row["owner_dni"] or row["driver_dni"]
@@ -546,7 +548,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     doc.close()
     pdf_bytes = out_buf.getvalue()
 
-    storage_path = f"certificados/{app_id}/certificado.pdf"
+    file_name = "certificado_2.pdf" if is_second_inspection else "certificado.pdf"
+    storage_path = f"certificados/{app_id}/{file_name}"
     try:
         public_url = _upload_pdf_and_get_public_url(pdf_bytes, storage_path)
     except Exception as e:
@@ -555,17 +558,30 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     try:
         async with get_conn_ctx() as conn:
-            await conn.execute(
-                """
-                UPDATE applications
-                SET status = $1,
-                    result = $2
-                WHERE id = $3
-                """,
-                "Completado",
-                resultado,
-                app_id,
-            )
+            if is_second_inspection:
+                await conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = $1,
+                        result_2 = $2
+                    WHERE id = $3
+                    """,
+                    "Completado",
+                    resultado,
+                    app_id,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = $1,
+                        result = $2
+                    WHERE id = $3
+                    """,
+                    "Completado",
+                    resultado,
+                    app_id,
+                )
     except Exception as e:
         # si querés tolerar esto como 207, podés no levantar excepción y devolver la data con un flag
         raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
@@ -576,6 +592,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "application_id": app_id,
         "new_status": "Completado",
         "new_result": resultado,
+        "is_second_inspection": is_second_inspection,
+        "file_name": file_name,
         "template_url": template_url,
         "storage_bucket": BUCKET_CERTS,
         "storage_path": storage_path,

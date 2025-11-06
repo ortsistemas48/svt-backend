@@ -97,71 +97,132 @@ async def _ensure_inspection_detail(conn, inspection_id: int, step_id: int) -> i
 @inspections_bp.route("/inspections", methods=["POST"])
 async def create_inspection():
     """
-    Crea una inspección nueva para una application dada,
-    o devuelve la existente si ya había una.
-    También pone la app en estado "En curso".
+    Crea o recupera la inspección activa de una aplicación.
+
+    - Si el trámite está en estado "Segunda Inspección" se crea (o reutiliza) una
+      inspección nueva con `is_second = TRUE`, siempre que el resultado previo
+      sea "Condicional".
+    - Caso contrario se aplica la lógica tradicional de primera inspección.
     """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
-    data = await request.get_json()
+    data = (await request.get_json()) or {}
     app_id = data.get("application_id")
-    if not app_id:
+    if app_id is None:
         return jsonify({"error": "Falta application_id"}), 400
 
-    async with get_conn_ctx() as conn:
-        # validar que exista la application
-        app_row = await conn.fetchrow(
-            "SELECT id FROM applications WHERE id = $1",
-            int(app_id),
-        )
-        if not app_row:
-            return jsonify({"error": "Application no encontrada"}), 404
+    try:
+        app_id_int = int(app_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "application_id inválido"}), 400
 
-        # si ya hay inspección asociada, devolvemos esa
-        existing = await conn.fetchrow(
+    async with get_conn_ctx() as conn:
+        application = await conn.fetchrow(
+            """
+            SELECT id, status, result, result_2
+            FROM applications
+            WHERE id = $1
+            """,
+            app_id_int,
+        )
+
+        if not application:
+            return jsonify({"error": "Aplicación no encontrada"}), 404
+
+        app_status = (application["status"] or "").strip()
+        is_second_request = app_status == "Segunda Inspección"
+
+        if is_second_request:
+            result_value = (application["result"] or "").strip()
+            if result_value != "Condicional":
+                return jsonify({
+                    "error": "Solo aplicaciones con resultado 'Condicional' pueden tener segunda inspección"
+                }), 400
+
+            if application.get("result_2") is not None:
+                return jsonify({
+                    "error": f"Esta aplicación ya completó su segunda inspección con resultado '{application['result_2']}'"
+                }), 400
+
+            existing_second = await conn.fetchrow(
+                """
+                SELECT id
+                FROM inspections
+                WHERE application_id = $1 AND COALESCE(is_second, FALSE) = TRUE
+                ORDER BY created_at DESC NULLS LAST, id DESC
+                LIMIT 1
+                """,
+                app_id_int,
+            )
+
+            if existing_second:
+                return jsonify({
+                    "message": "Segunda inspección ya existente",
+                    "inspection_id": existing_second["id"],
+                    "is_new": False,
+                    "is_second": True,
+                }), 200
+
+            row = await conn.fetchrow(
+                """
+                INSERT INTO inspections (application_id, user_id, is_second, created_at)
+                VALUES ($1, $2, TRUE, NOW())
+                RETURNING id
+                """,
+                app_id_int,
+                user_id,
+            )
+
+            return jsonify({
+                "message": "Segunda inspección creada",
+                "inspection_id": row["id"],
+                "is_new": True,
+                "is_second": True,
+            }), 201
+
+        existing_first = await conn.fetchrow(
             """
             SELECT id
             FROM inspections
-            WHERE application_id = $1
+            WHERE application_id = $1 AND COALESCE(is_second, FALSE) = FALSE
             ORDER BY id ASC
             LIMIT 1
             """,
-            int(app_id),
+            app_id_int,
         )
-        if existing:
-            return jsonify(
-                {
-                    "message": "Inspección ya existente",
-                    "inspection_id": existing["id"],
-                }
-            ), 200
 
-        # creamos una nueva
+        if existing_first:
+            return jsonify({
+                "message": "Inspección ya existente",
+                "inspection_id": existing_first["id"],
+                "is_new": False,
+                "is_second": False,
+            }), 200
+
         row = await conn.fetchrow(
             """
-            INSERT INTO inspections (application_id, user_id)
-            VALUES ($1, $2)
+            INSERT INTO inspections (application_id, user_id, is_second, created_at)
+            VALUES ($1, $2, FALSE, NOW())
             RETURNING id
             """,
-            int(app_id),
+            app_id_int,
             user_id,
         )
 
-        # marcamos la application "En curso"
         await conn.execute(
             "UPDATE applications SET status = $1 WHERE id = $2",
             "En curso",
-            int(app_id),
+            app_id_int,
         )
 
-    return jsonify(
-        {
+        return jsonify({
             "message": "Inspección creada",
             "inspection_id": row["id"],
-        }
-    ), 201
+            "is_new": True,
+            "is_second": False,
+        }), 201
 
 
 # ---------------------------------------------------------------------------

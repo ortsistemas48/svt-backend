@@ -534,6 +534,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 a.date,
                 a.status,
                 a.result,
+                a.result_2,
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
@@ -562,6 +563,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             "date": r["date"].isoformat() if r["date"] else None,
             "status": r["status"],
             "result": r["result"],
+            "result_2": r["result_2"],
             "owner": (
                 {
                     "first_name": r["owner_first_name"],
@@ -630,6 +632,26 @@ async def enqueue_application(app_id):
 
     return jsonify({"message": "Trámite enviado a la cola"}), 200
 
+@applications_bp.route("/<int:app_id>/secondInspection", methods=["POST"])
+async def sendToSecondInspection(app_id):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+    
+    async with get_conn_ctx() as conn:
+        application = await conn.fetchrow(
+            "SELECT id FROM applications WHERE id = $1",
+            app_id
+        )
+        if not application:
+            return jsonify({"error": "Trámite no encontrado o sin permiso"}), 404
+
+        await conn.execute(
+            "UPDATE applications SET status = $1 WHERE id = $2",
+            "Segunda Inspección", app_id
+        )
+
+    return jsonify({"message": "Trámite enviado a la cola"}), 200
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
 async def list_completed_applications_by_workshop(workshop_id: int):
     """
@@ -645,6 +667,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
       - owner_fullname: str (filtrar por nombre completo del propietario)
       - owner_dni: str (filtrar por DNI del propietario)
       - result: str (filtrar por resultado de la aplicación)
+      - result_2: str (filtrar por resultado de la segunda inspección)
       - q: str (búsqueda general en patente, nombre, apellido, DNI, resultado)
     Respuesta:
       - Objeto con lista de applications y metadatos de paginación
@@ -672,8 +695,9 @@ async def list_completed_applications_by_workshop(workshop_id: int):
     owner_fullname = (request.args.get("owner_fullname") or "").strip()
     owner_dni = (request.args.get("owner_dni") or "").strip()
     result = (request.args.get("result") or "").strip()
+    result_2 = (request.args.get("result_2") or "").strip()
     q = (request.args.get("q") or "").strip()
-    
+
     # Calcular offset
     offset = (page - 1) * per_page
 
@@ -728,6 +752,12 @@ async def list_completed_applications_by_workshop(workshop_id: int):
         filters.append(f"a.result ILIKE ${param_count}")
         params.append(f"%{result}%")
 
+    # Filtro por result_2
+    if result_2:
+        param_count += 1
+        filters.append(f"a.result_2 ILIKE ${param_count}")
+        params.append(f"%{result_2}%")
+
     # Búsqueda general (q)
     if q:
         param_count += 1
@@ -739,7 +769,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 o.first_name     ILIKE ${param_count} OR
                 o.last_name      ILIKE ${param_count} OR
                 o.dni::text      ILIKE ${param_count} OR
-                a.result         ILIKE ${param_count}
+                a.result         ILIKE ${param_count} OR
+                a.result_2       ILIKE ${param_count}
             )
         """)
         params.append(f"%{q}%")
@@ -789,6 +820,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 a.date,
                 a.status,
                 a.result,
+                a.result_2,
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
@@ -818,6 +850,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 "date": r["date"].isoformat() if r["date"] else None,
                 "status": r["status"],
                 "result": r.get("result"),
+                "result_2": r.get("result_2"),
                 "owner": (
                     {
                         "first_name": r["owner_first_name"],
@@ -875,6 +908,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
             "owner_fullname": owner_fullname,
             "owner_dni": owner_dni,
             "result": result,
+            "result_2": result_2,
             "q": q
         }
     }
