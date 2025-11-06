@@ -408,7 +408,11 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
         insp = await conn.fetchrow(
             """
-            SELECT i.id, i.global_observations, COALESCE(i.is_second, FALSE) AS is_second
+            SELECT
+                i.id,
+                i.global_observations,
+                i.created_at,
+                COALESCE(i.is_second, FALSE) AS is_second
             FROM inspections i
             WHERE i.application_id = $1
             ORDER BY i.id DESC
@@ -448,12 +452,20 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     provincia = row["owner_province"]
 
     argentina_tz = pytz.timezone("America/Argentina/Buenos_Aires")
-    fecha_emision_dt = insp["created_at"] if insp and "created_at" in insp else row["app_date"]
+    insp_created_at = insp.get("created_at") if insp else None
+    if is_second_inspection and insp_created_at:
+        fecha_emision_dt = insp_created_at
+    else:
+        fecha_emision_dt = insp_created_at or row["app_date"]
+    print("fecha_emision_dt", fecha_emision_dt)
     fecha_emision = _fmt_date(fecha_emision_dt)
     fecha_vencimiento = _calc_vencimiento(fecha_emision_dt, row["car_year"], argentina_tz) if fecha_emision_dt else None
 
     resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
-
+    resultado_primera_inspeccion = (row["app_result"] or row["app_status"] or "").strip()
+    resultado_mapeo_principal = resultado if not is_second_inspection else (resultado_primera_inspeccion or resultado)
+    resultado_segunda_inspeccion = resultado if is_second_inspection else ""
+    
     tipo_puro = (row["vehicle_type"] or "").strip().upper()
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
     uso_display = _usage_type_display((row["usage_type"] or "").strip())
@@ -526,11 +538,11 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${marca_chasis}":          row["chassis_brand"] or "",
         "${numero_chasis}":         row["chassis_number"] or "",
         "${tipo_vehiculo}":         tipo_puro,
-        "${resultado_inspeccion}":  resultado,
+        "${resultado_inspeccion}":  resultado_mapeo_principal,
         "${observaciones}":         observaciones_text,
         "${observaciones2}":        observaciones_text2,
         "${clasif}":                clasificacion,
-        "${resultado2}":            "",
+        "${resultado2}":            resultado_segunda_inspeccion,
         "${crt_numero}":            crt_numero,
         "${oblea_numero}":          oblea_text,
     }
