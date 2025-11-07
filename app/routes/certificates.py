@@ -465,13 +465,13 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     resultado_primera_inspeccion = (row["app_result"] or row["app_status"] or "").strip()
     resultado_mapeo_principal = resultado if not is_second_inspection else (resultado_primera_inspeccion or resultado)
     resultado_segunda_inspeccion = resultado if is_second_inspection else ""
-    
     tipo_puro = (row["vehicle_type"] or "").strip().upper()
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
     uso_display = _usage_type_display((row["usage_type"] or "").strip())
     clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
     clasificacion = _wrap_to_width(clasificacion_base, width=40)
 
+    resultado_final = resultado_mapeo_principal if not is_second_inspection else resultado_segunda_inspeccion
     oblea = str(row["sticker_number"] or "")
     current_year_ar = datetime.now(argentina_tz).year
     crt_numero = f"{row['application_id']}/{current_year_ar}"
@@ -511,7 +511,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     qr_target = oblea
     qr_link = f"https://www.checkrto.com/qr/{qr_target}"
     oblea_text = oblea if oblea else "Sin Asignar"
-
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
         "${fecha_vencimiento}":     fecha_vencimiento or "",
@@ -545,6 +544,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${resultado2}":            resultado_segunda_inspeccion,
         "${crt_numero}":            crt_numero,
         "${oblea_numero}":          oblea_text,
+        "${resultado_final}":       resultado_final,
     }
 
     # abrir, reemplazar, guardar
