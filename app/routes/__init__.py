@@ -14,6 +14,7 @@ from .payment_receipts import payment_receipts_bp
 from .payments_admin import payments_admin_bp
 from .statistics import statistics_bp
 from .qr import qr_bp
+from .inspection_validity import inspection_validity_bp
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(applications_bp, url_prefix="/applications")
@@ -31,3 +32,4 @@ def register_routes(app):
     app.register_blueprint(payments_admin_bp , url_prefix="/payments_admin")
     app.register_blueprint(statistics_bp , url_prefix="/statistics")
     app.register_blueprint(qr_bp, url_prefix="/qr")
+    app.register_blueprint(inspection_validity_bp, url_prefix="/inspection_validity")
