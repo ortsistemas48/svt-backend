@@ -46,7 +46,8 @@ async def get_qr_data(sticker_number: str):
               la.id      AS application_id,
               la.date    AS application_date,
               la.status  AS application_status,
-              la.result  AS application_result
+              la.result  AS application_result,
+              li.expiration_date AS expiration_date
             FROM base b
             LEFT JOIN LATERAL (
               SELECT a.id, a.date, a.status, a.result
@@ -55,6 +56,13 @@ async def get_qr_data(sticker_number: str):
               ORDER BY a.date DESC NULLS LAST, a.id DESC
               LIMIT 1
             ) la ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT i.expiration_date
+              FROM inspections i
+              WHERE i.application_id = la.id
+              ORDER BY i.id DESC
+              LIMIT 1
+            ) li ON TRUE
             """,
             sticker_number
         )
@@ -73,12 +81,15 @@ async def get_qr_data(sticker_number: str):
 
     inspection = None
     if row["application_id"] is not None:
+        exp = row["expiration_date"]
+        if exp is not None and hasattr(exp, "isoformat"):
+            exp = exp.isoformat()
         inspection = {
             "application_id": row["application_id"],
             "inspection_date": row["application_date"],
             "status": row["application_status"],
             "result": row["application_result"],
-            "expiration_date": None,
+            "expiration_date": exp,
         }
 
     return jsonify({
