@@ -13,6 +13,15 @@ from supabase import create_client, Client
 import textwrap
 from fitz import PDF_REDACT_IMAGE_NONE, PDF_REDACT_LINE_ART_NONE, PDF_REDACT_TEXT_REMOVE
 import asyncio
+import json
+import unicodedata
+from calendar import monthrange
+
+# Silenciar warnings / errores de MuPDF en stdout/stderr
+try:
+    fitz.TOOLS.mupdf_display_errors(False)
+except Exception:
+    pass
 
 from app.jobs import new_job, get_job, run_job
 
@@ -232,6 +241,238 @@ def _years_delta(base_dt: datetime, years: int) -> datetime:
     except ValueError:
         return base_dt + timedelta(days=365 * years)
 
+_LOCALIDADES_INDEX = None 
+
+def _normalize_name(value: str | None) -> str:
+    if not value:
+        return ""
+    s = unicodedata.normalize("NFKD", str(value))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch.isspace():
+            out.append(ch)
+    s = "".join(out)
+    return " ".join(s.split())
+
+def _build_localidades_index():
+    global _LOCALIDADES_INDEX
+    if _LOCALIDADES_INDEX is not None:
+        return _LOCALIDADES_INDEX
+
+    try:
+        json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "utils", "localidades.json")
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        localidades = data.get("localidades", [])
+        index = {}
+        for item in localidades:
+            prov_nombre = (item.get("provincia") or {}).get("nombre")
+            prov_id = (item.get("provincia") or {}).get("id")
+            loc_full_id = item.get("id")
+            loc_censal = item.get("localidad_censal") or {}
+            loc_censal_nombre = loc_censal.get("nombre")
+            loc_censal_id = loc_censal.get("id")
+
+            nombre = item.get("nombre")
+            municipio_nombre = (item.get("municipio") or {}).get("nombre")
+            dpto_nombre = (item.get("departamento") or {}).get("nombre")
+
+            prov_norm = _normalize_name(prov_nombre)
+
+            # Registrar candidatos con prioridad (menor es mejor)
+            def register_candidate(city_raw, priority: int):
+                key_city = _normalize_name(city_raw)
+                if not (prov_norm and key_city and prov_id and (loc_full_id or loc_censal_id)):
+                    return
+                k = (prov_norm, key_city)
+                candidate = (prov_id, (loc_full_id or loc_censal_id), priority)
+                if k not in index:
+                    index[k] = candidate
+                else:
+                    _, _, current_pr = index[k]
+                    if priority < current_pr:
+                        index[k] = candidate
+
+            # Prioridades: nombre exacto (1) > municipio (2) > localidad_censal (3) > departamento (4)
+            register_candidate(nombre, 1)
+            register_candidate(municipio_nombre, 2)
+            register_candidate(loc_censal_nombre, 3)
+            register_candidate(dpto_nombre, 4)
+        _LOCALIDADES_INDEX = index
+    except Exception:
+        _LOCALIDADES_INDEX = {}
+    return _LOCALIDADES_INDEX
+
+def _find_localidad_codes(province_name: str | None, city_name: str | None) -> tuple[str | None, str | None]:
+    index = _build_localidades_index()
+    prov_norm = _normalize_name(province_name)
+    city_norm = _normalize_name(city_name)
+    if not prov_norm or not city_norm:
+        return None, None
+    if (prov_norm, city_norm) in index:
+        val = index[(prov_norm, city_norm)]
+        return val[0], val[1]
+    parts = city_norm.split()
+    for i in range(len(parts), 0, -1):
+        cand = " ".join(parts[:i])
+        if (prov_norm, cand) in index:
+            val = index[(prov_norm, cand)]
+            return val[0], val[1]
+    return None, None
+
+def _add_months(base_dt: datetime, months: int) -> datetime:
+    if months is None:
+        return base_dt
+    y = base_dt.year + (base_dt.month - 1 + months) // 12
+    m = (base_dt.month - 1 + months) % 12 + 1
+    last_day = monthrange(y, m)[1]
+    d = min(base_dt.day, last_day)
+    try:
+        return base_dt.replace(year=y, month=m, day=d)
+    except ValueError:
+        return base_dt + timedelta(days=30 * months)
+
+def _parse_spanish_month(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        if 1 <= value <= 12:
+            return value
+        return None
+    s = _normalize_name(str(value))
+    # normalizados sin tildes
+    mapping = {
+        "enero": 1,
+        "febrero": 2,
+        "marzo": 3,
+        "abril": 4,
+        "mayo": 5,
+        "junio": 6,
+        "julio": 7,
+        "agosto": 8,
+        "septiembre": 9,
+        "octubre": 10,
+        "noviembre": 11,
+        "diciembre": 12
+        }
+    return mapping.get(s, None)
+
+async def _calc_vencimiento_from_rules(
+    fecha_emision_dt: datetime | None,
+    province_name: str | None,
+    city_name: str | None,
+    usage_code: str | None,
+    registration_year: int | None,
+    registration_month: int | str | None,
+    now_tz: pytz.BaseTzInfo,
+) -> datetime | None:
+    if not fecha_emision_dt:
+        print("[CRT] _calc_vencimiento_from_rules: sin fecha_emision_dt")
+        return None
+
+    base = fecha_emision_dt.astimezone(now_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
+    prov_code, loc_key = _find_localidad_codes(province_name, city_name)
+    usage = (usage_code or "").strip().upper() or None
+
+    # Si faltan datos esenciales de patentamiento, no podemos calcular por reglas
+    if not usage or not registration_year:
+        print(f"[CRT] _calc_vencimiento_from_rules: faltan datos => usage={usage} registration_year={registration_year}")
+        return None
+
+    rule = None
+    try:
+        if prov_code and loc_key:
+            print(f"[CRT] Localidad taller: provincia='{province_name}' ciudad='{city_name}' -> prov_code={prov_code} loc_key={loc_key} usage={usage}")
+            async with get_conn_ctx() as conn:
+                rule = await conn.fetchrow(
+                    """
+                    SELECT localidad_key, usage_code, up_to_36_months, from_3_to_7_years, over_7_years
+                    FROM inspection_validity_rules
+                    WHERE (localidad_key = $1 OR localidad_key LIKE ($1 || '%'))
+                    ORDER BY 
+                      CASE WHEN usage_code = $2 THEN 0
+                           WHEN usage_code = 'C' THEN 1
+                           ELSE 2 END,
+                      CASE WHEN localidad_key = $1 THEN 0 ELSE 1 END,
+                      localidad_key
+                    LIMIT 1
+                    """,
+                    str(loc_key),
+                    usage,
+                )
+        else:
+            print(f"[CRT] No se pudo mapear localidad del taller a códigos INDEC: provincia='{province_name}' ciudad='{city_name}'")
+    except Exception as e:
+        print(f"[CRT] Error consultando inspection_validity_rules: {e}")
+        rule = None
+
+    reg_month = _parse_spanish_month(registration_month) or 1
+    try:
+        elapsed_months = (base.year - int(registration_year)) * 12 + (base.month - reg_month)
+        elapsed_months = max(0, elapsed_months)
+    except Exception:
+        print(f"[CRT] No se pudo calcular elapsed_months con registration_year={registration_year} registration_month={registration_month} (parseado={reg_month})")
+        return None
+    elapsed_years = elapsed_months // 12
+    print(f"[CRT] Antigüedad desde patentamiento: {elapsed_months} meses (~{elapsed_years} años). Mes patentamiento parseado={reg_month}")
+
+    default_up_to_36 = 36  
+    default_from_3_to_7 = 24 
+    default_over_7 = 12
+
+    if rule:
+        up_to_36 = rule["up_to_36_months"]
+        from_3_to_7 = rule["from_3_to_7_years"]
+        over_7 = rule["over_7_years"]
+        print(f"[CRT] Regla encontrada para localidad_key={rule['localidad_key']} usage={rule['usage_code']}: up_to_36={up_to_36}m, 3_a_7={from_3_to_7}m, over_7={over_7}m")
+    else:
+        up_to_36 = default_up_to_36
+        from_3_to_7 = default_from_3_to_7
+        over_7 = default_over_7
+        print(f"[CRT] Sin regla para localidad/uso. Usando defaults: up_to_36={up_to_36}m, 3_a_7={from_3_to_7}m, over_7={over_7}m")
+
+    if elapsed_months <= 36 and up_to_36:
+        vto_dt = _add_months(base, int(up_to_36))
+        print(f"[CRT] Bucket ≤36 meses. Sumando {int(up_to_36)} meses. Vencimiento={vto_dt.date()}")
+        return vto_dt
+
+    if 3 <= elapsed_years <= 7 and from_3_to_7:
+        vto_dt = _add_months(base, int(from_3_to_7))
+        print(f"[CRT] Bucket 3–7 años. Sumando {int(from_3_to_7)} meses. Vencimiento={vto_dt.date()}")
+        return vto_dt
+
+    if elapsed_years > 7 and over_7:
+        vto_dt = _add_months(base, int(over_7))
+        print(f"[CRT] Bucket >7 años. Sumando {int(over_7)} meses. Vencimiento={vto_dt.date()}")
+        return vto_dt
+
+    print("[CRT] Regla con valores nulos para bucket correspondiente; no se pudo calcular por reglas.")
+    return None
+
+def _calc_vencimiento_fallback_dt(fecha_emision_dt: datetime | None, car_year: int | None, now_tz: pytz.BaseTzInfo) -> datetime | None:
+    if not fecha_emision_dt:
+        return None
+    base = fecha_emision_dt.astimezone(now_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
+    try:
+        cy = datetime.now(now_tz).year
+        age = None if not car_year else max(0, cy - int(car_year))
+    except Exception:
+        age = None
+    if age is None:
+        delta_years = 1
+    elif age == 0:
+        delta_years = 3
+    elif 3 <= age <= 7:
+        delta_years = 2
+    elif age > 7:
+        delta_years = 1
+    else:
+        delta_years = 1
+    return _years_delta(base, delta_years)
+
+
 def _calc_vencimiento(fecha_emision_dt: datetime | None, car_year: int | None, now_tz: pytz.BaseTzInfo) -> str | None:
     if not fecha_emision_dt:
         return None
@@ -255,7 +496,6 @@ def _calc_vencimiento(fecha_emision_dt: datetime | None, car_year: int | None, n
     vto_dt = _years_delta(base, delta_years)
     return _fmt_date(vto_dt)
 
-# ---------- mapeos completos ----------
 VEHICLE_TYPE_LABELS = {
     "L":  "Vehículo automotor con menos de CUATRO (4) ruedas",
     "L1": "2 Ruedas, Menos de 50 CM3, Menos de 40 KM/H",
@@ -315,7 +555,6 @@ def _wrap_to_width(text: str, width: int = 35) -> str:
         lines.extend(wrapped if wrapped else [""])
     return "\n".join(lines)
 
-# ---------- NUEVO: endpoint async que dispara job y responde 202 ----------
 @certificates_bp.route("/certificates/application/<int:app_id>/generate", methods=["POST"])
 async def certificates_generate_by_application(app_id: int):
     payload = await request.get_json() or {}
@@ -347,7 +586,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     }
     template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
-    # descarga del template, bloqueante pero dentro del job, si querés pasar a httpx async mejor
     try:
         t_resp = requests.get(template_url, timeout=20)
         t_resp.raise_for_status()
@@ -380,6 +618,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             c.brand            AS car_brand,
             c.model            AS car_model,
             c.manufacture_year AS car_year,
+            c.registration_year AS car_registration_year,
+            c.registration_month AS car_registration_month,
             c.engine_brand     AS engine_brand,
             c.engine_number    AS engine_number,
             c.chassis_brand    AS chassis_brand,
@@ -391,6 +631,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
             ws.razon_social AS workshop_name,
             ws.plant_number AS workshop_plant_number,
+            ws.province      AS workshop_province,
+            ws.city          AS workshop_city,
 
             s.sticker_number AS sticker_number
             FROM applications a
@@ -459,7 +701,26 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         fecha_emision_dt = insp_created_at or row["app_date"]
     print("fecha_emision_dt", fecha_emision_dt)
     fecha_emision = _fmt_date(fecha_emision_dt)
-    fecha_vencimiento = _calc_vencimiento(fecha_emision_dt, row["car_year"], argentina_tz) if fecha_emision_dt else None
+    fecha_vencimiento = None
+    vto_dt_for_db = None
+    if fecha_emision_dt:
+        if condicion == "Condicional":
+            vto_dt_for_db = fecha_emision_dt + timedelta(days=60)
+        elif condicion == "Rechazado":
+            vto_dt_for_db = None
+        else:
+            vto_dt_for_db = await _calc_vencimiento_from_rules(
+                fecha_emision_dt=fecha_emision_dt,
+                province_name=row["workshop_province"],
+                city_name=row["workshop_city"],
+                usage_code=row["usage_type"],
+                registration_year=row["car_registration_year"],
+                registration_month=row["car_registration_month"],
+                now_tz=argentina_tz,
+            )
+            if not vto_dt_for_db:
+                vto_dt_for_db = _calc_vencimiento_fallback_dt(fecha_emision_dt, row["car_year"], argentina_tz)
+        fecha_vencimiento = _fmt_date(vto_dt_for_db) if vto_dt_for_db else None
 
     resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
     resultado_primera_inspeccion = (row["app_result"] or row["app_status"] or "").strip()
@@ -511,6 +772,22 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     qr_target = oblea
     qr_link = f"https://www.checkrto.com/qr/{qr_target}"
     oblea_text = oblea if oblea else "Sin Asignar"
+
+    if insp and insp.get("id") and vto_dt_for_db:
+        try:
+            async with get_conn_ctx() as conn:
+                await conn.execute(
+                    """
+                    UPDATE inspections
+                    SET expiration_date = $2
+                    WHERE id = $1
+                    """,
+                    insp["id"],
+                    vto_dt_for_db.date(),
+                )
+        except Exception:
+            pass
+
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
         "${fecha_vencimiento}":     fecha_vencimiento or "",
@@ -547,7 +824,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${resultado_final}":       resultado_final,
     }
 
-    # abrir, reemplazar, guardar
     try:
         doc = fitz.open(stream=template_bytes, filetype="pdf")
     except Exception as e:
@@ -565,7 +841,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     try:
         public_url = _upload_pdf_and_get_public_url(pdf_bytes, storage_path)
     except Exception as e:
-        # subido como error 207 en tu versión, acá dejamos el job en done con warning si preferís
         raise RuntimeError(f"PDF generado, no se pudo subir a Supabase Storage, {e}")
 
     try:
@@ -595,8 +870,85 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                     app_id,
                 )
     except Exception as e:
-        # si querés tolerar esto como 207, podés no levantar excepción y devolver la data con un flag
         raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
+
+    # ----- DEBUG RESUMEN FINAL -----
+    try:
+        prov_dbg = row.get("workshop_province")
+        city_dbg = row.get("workshop_city")
+        usage_dbg = (row.get("usage_type") or "").strip().upper()
+        reg_year_dbg = row.get("car_registration_year")
+        reg_mon_raw = row.get("car_registration_month")
+        reg_mon_dbg = _parse_spanish_month(reg_mon_raw) or 1
+
+        prov_code_dbg, loc_key_dbg = _find_localidad_codes(prov_dbg, city_dbg)
+
+        # calcular antigüedad desde patentamiento contra la fecha de emisión
+        base_dbg = fecha_emision_dt.astimezone(argentina_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
+        elapsed_months_dbg = None
+        elapsed_years_dbg = None
+        try:
+            if reg_year_dbg:
+                elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12 + (base_dbg.month - reg_mon_dbg)
+                elapsed_months_dbg = max(0, elapsed_months_dbg)
+                elapsed_years_dbg = elapsed_months_dbg // 12
+        except Exception:
+            pass
+
+        # obtener regla (si hay mapeo) con preferencia por match exacto y luego prefijo
+        up36_dbg = 36
+        a3_7_dbg = 24
+        o7_dbg = 12
+        used_lkey_dbg = None
+        used_usage_dbg = None
+        if prov_code_dbg and loc_key_dbg and usage_dbg:
+            try:
+                async with get_conn_ctx() as conn:
+                    rule_dbg = await conn.fetchrow(
+                        """
+                        SELECT localidad_key, usage_code, up_to_36_months, from_3_to_7_years, over_7_years
+                        FROM inspection_validity_rules
+                        WHERE (localidad_key = $1 OR localidad_key LIKE ($1 || '%'))
+                        ORDER BY 
+                          CASE WHEN usage_code = $2 THEN 0
+                               WHEN usage_code = 'C' THEN 1
+                               ELSE 2 END,
+                          CASE WHEN localidad_key = $1 THEN 0 ELSE 1 END,
+                          localidad_key
+                        LIMIT 1
+                        """,
+                        str(loc_key_dbg),
+                        usage_dbg,
+                    )
+                if rule_dbg:
+                    used_lkey_dbg = rule_dbg["localidad_key"]
+                    used_usage_dbg = rule_dbg["usage_code"]
+                    up36_dbg = rule_dbg["up_to_36_months"] or up36_dbg
+                    a3_7_dbg = rule_dbg["from_3_to_7_years"] or a3_7_dbg
+                    o7_dbg = rule_dbg["over_7_years"] or o7_dbg
+            except Exception as e:
+                print(f"[CRT][RESUMEN] Error consultando regla para debug: {e}")
+
+        bucket_dbg = None
+        if elapsed_months_dbg is not None:
+            if elapsed_months_dbg <= 36:
+                bucket_dbg = "up_to_36"
+            elif elapsed_years_dbg is not None and 3 <= elapsed_years_dbg <= 7:
+                bucket_dbg = "3_to_7_years"
+            elif elapsed_years_dbg is not None and elapsed_years_dbg > 7:
+                bucket_dbg = "over_7_years"
+
+        print(
+            "[CRT][RESUMEN] "
+            f"Taller='{city_dbg}' ('{prov_dbg}') -> prov_code={prov_code_dbg} loc_key={loc_key_dbg}; "
+            f"rule_localidad_key_usada={used_lkey_dbg}; rule_usage_usado={used_usage_dbg}; "
+            f"usage={usage_dbg}; patentamiento={reg_year_dbg}-{reg_mon_dbg:02d}; "
+            f"antiguedad={elapsed_months_dbg}m (~{elapsed_years_dbg}a); "
+            f"meses_por_rango: up_to_36={up36_dbg}, 3_a_7={a3_7_dbg}, over_7={o7_dbg}; "
+            f"bucket_usado={bucket_dbg}; vto={fecha_vencimiento}"
+        )
+    except Exception as e:
+        print(f"[CRT][RESUMEN] Error generando resumen final: {e}")
 
     # devolver dict final para el job
     return {
