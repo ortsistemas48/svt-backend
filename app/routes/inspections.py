@@ -343,7 +343,46 @@ async def delete_inspection(inspection_id: int):
 
 
 # ---------------------------------------------------------------------------
-# 4. Steps de la aplicación (para render de la pantalla)
+# 4. Obtener inspección por application_id y is_second
+# ---------------------------------------------------------------------------
+
+@inspections_bp.route("/applications/<int:app_id>/inspection", methods=["GET"])
+async def get_inspection_by_application(app_id: int):
+    """
+    Devuelve la inspección de una aplicación.
+    Query params:
+      - is_second: boolean (opcional, por defecto False para primera inspección)
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    is_second = request.args.get("is_second", "false").lower() == "true"
+
+    async with get_conn_ctx() as conn:
+        inspection = await conn.fetchrow(
+            """
+            SELECT id
+            FROM inspections
+            WHERE application_id = $1 AND COALESCE(is_second, FALSE) = $2
+            ORDER BY created_at DESC NULLS LAST, id DESC
+            LIMIT 1
+            """,
+            app_id,
+            is_second,
+        )
+
+        if not inspection:
+            return jsonify({"error": "Inspección no encontrada"}), 404
+
+        return jsonify({
+            "inspection_id": inspection["id"],
+            "is_second": is_second,
+        }), 200
+
+
+# ---------------------------------------------------------------------------
+# 5. Steps de la aplicación (para render de la pantalla)
 # ---------------------------------------------------------------------------
 
 @inspections_bp.route("/applications/<int:app_id>/steps", methods=["GET"])

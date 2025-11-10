@@ -320,15 +320,40 @@ async def get_application(id):
 
     async with get_conn_ctx() as conn:
         application = await conn.fetchrow("""
-            SELECT id, user_id, date, workshop_id, status, result, consumed
-            FROM applications
-            WHERE id = $1 
+            SELECT 
+                a.id, 
+                a.user_id, 
+                a.date, 
+                a.workshop_id, 
+                a.status, 
+                a.result, 
+                a.consumed, 
+                a.result_2,
+                (SELECT created_at 
+                 FROM inspections 
+                 WHERE application_id = a.id AND COALESCE(is_second, FALSE) = FALSE
+                 ORDER BY created_at DESC NULLS LAST, id DESC
+                 LIMIT 1) AS inspection_1_date,
+                (SELECT created_at 
+                 FROM inspections 
+                 WHERE application_id = a.id AND COALESCE(is_second, FALSE) = TRUE
+                 ORDER BY created_at DESC NULLS LAST, id DESC
+                 LIMIT 1) AS inspection_2_date
+            FROM applications a
+            WHERE a.id = $1 
         """, id)
 
     if not application:
         return jsonify({"error": "Trámite no encontrado"}), 404
 
-    return jsonify(dict(application)), 200
+    result = dict(application)
+    # Convertir fechas a ISO format si existen
+    if result.get("inspection_1_date") and hasattr(result["inspection_1_date"], "isoformat"):
+        result["inspection_1_date"] = result["inspection_1_date"].isoformat()
+    if result.get("inspection_2_date") and hasattr(result["inspection_2_date"], "isoformat"):
+        result["inspection_2_date"] = result["inspection_2_date"].isoformat()
+
+    return jsonify(result), 200
 
 
 @applications_bp.route("/<int:id>/data", methods=["GET"])
