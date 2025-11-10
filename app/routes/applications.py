@@ -530,7 +530,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             f"""
             SELECT
                 a.id,
-                a.user_id,
+                concat(u.first_name, ' ', u.last_name) AS user_name,
                 a.date,
                 a.status,
                 a.result,
@@ -543,11 +543,16 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 d.dni         AS driver_dni,
                 c.license_plate,
                 c.brand,
-                c.model
+                c.model,
+                i1.created_at AS inspection_1_date,
+                i2.created_at AS inspection_2_date
             FROM applications a
+            LEFT JOIN users u ON a.user_id = u.id
             LEFT JOIN persons o ON a.owner_id = o.id
             LEFT JOIN persons d ON a.driver_id = d.id
             LEFT JOIN cars    c ON a.car_id   = c.id
+            LEFT JOIN inspections i1 ON a.id = i1.application_id AND COALESCE(i1.is_second, FALSE) = FALSE
+            LEFT JOIN inspections i2 ON a.id = i2.application_id AND COALESCE(i2.is_second, FALSE) = TRUE
             WHERE {where_sql}
             ORDER BY a.date DESC NULLS LAST
             LIMIT ${limit_idx} OFFSET ${offset_idx}
@@ -559,11 +564,13 @@ async def list_full_applications_by_workshop(workshop_id: int):
     for r in rows:
         items.append({
             "application_id": r["id"],
-            "user_id": r["user_id"],
+            "user_name": r["user_name"],
             "date": r["date"].isoformat() if r["date"] else None,
             "status": r["status"],
             "result": r["result"],
             "result_2": r["result_2"],
+            "inspection_1_date": r["inspection_1_date"].isoformat() if r["inspection_1_date"] else None,
+            "inspection_2_date": r["inspection_2_date"].isoformat() if r["inspection_2_date"] else None,
             "owner": (
                 {
                     "first_name": r["owner_first_name"],
