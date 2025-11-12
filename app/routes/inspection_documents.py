@@ -47,22 +47,27 @@ async def list_inspection_documents(inspection_id: int):
     role = _norm_role(role_raw) if role_raw is not None else None
 
     step_id = _parse_int(request.args.get("step_id"))
+    doc_type = request.args.get("type")
+    doc_type = (doc_type or "").strip().lower() or None
 
     filters = ["inspection_id = $1"]
     params = [inspection_id]
     if role is not None:
-        filters.append("role = $2")
+        filters.append(f"role = ${len(params)+1}")
         params.append(role)
     if step_id is not None:
         filters.append(f"step_id = ${len(params)+1}")
         params.append(step_id)
+    if doc_type is not None:
+        filters.append(f"type = ${len(params)+1}")
+        params.append(doc_type)
 
     where_sql = " AND ".join(filters)
 
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(f"""
             SELECT id, inspection_id, step_id, role,
-                   file_name, bucket, object_path, file_url,
+                   type, file_name, bucket, object_path, file_url,
                    size_bytes, mime_type, created_at
             FROM inspection_documents
             WHERE {where_sql}
@@ -79,6 +84,7 @@ async def upload_inspection_documents(inspection_id: int):
       files: File[]  requerido
       role:  global, step, owner, driver, car, generic  opcional
       step_id: int  opcional, solo si role = 'step' o si querés atarlo a un paso
+      type:   string opcional, para clasificar (ej: 'technical_report', 'vehicle_photo')
     """
     user_id = g.get("user_id")
     if not user_id:
@@ -93,6 +99,9 @@ async def upload_inspection_documents(inspection_id: int):
     form_data = await request.form
     role = _norm_role(request.args.get("role") or form_data.get("role"))
     step_id = _parse_int(request.args.get("step_id") or form_data.get("step_id"))
+    doc_type_raw = (request.args.get("type") or form_data.get("type") or "").strip().lower()
+    # sanitizar type para evitar caracteres raros en paths
+    doc_type = re.sub(r"[^a-z0-9_-]+", "-", doc_type_raw) if doc_type_raw else None
 
     files_md = await request.files
     files = files_md.getlist("files")
@@ -118,7 +127,8 @@ async def upload_inspection_documents(inspection_id: int):
 
         # ruta en el bucket algo como: inspections/<inspection_id>/<role or step>/<uuid>-<file>
         subfolder = f"step-{step_id}" if (role == "step" and step_id is not None) else role
-        dest = f"inspections/{inspection_id}/{subfolder}/{uuid.uuid4().hex}-{safe_name}"
+        type_folder = f"{doc_type}/" if doc_type else ""
+        dest = f"inspections/{inspection_id}/{subfolder}/{type_folder}{uuid.uuid4().hex}-{safe_name}"
 
         client.storage.from_(BUCKET_INSPECTION_DOCS).upload(
             path=dest,
@@ -134,13 +144,13 @@ async def upload_inspection_documents(inspection_id: int):
         async with get_conn_ctx() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO inspection_documents
-                  (inspection_id, step_id, role, file_name, bucket, object_path, file_url,
+                  (inspection_id, step_id, role, type, file_name, bucket, object_path, file_url,
                    size_bytes, mime_type)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id, inspection_id, step_id, role,
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING id, inspection_id, step_id, role, type,
                           file_name, bucket, object_path, file_url,
                           size_bytes, mime_type, created_at
-            """, inspection_id, step_id, role, safe_name,
+            """, inspection_id, step_id, role, doc_type, safe_name,
                  BUCKET_INSPECTION_DOCS, dest, file_url, len(data), f.mimetype)
             saved.append(dict(row))
 
