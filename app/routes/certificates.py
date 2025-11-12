@@ -16,6 +16,7 @@ import asyncio
 import json
 import unicodedata
 from calendar import monthrange
+import time
 
 # Silenciar warnings / errores de MuPDF en stdout/stderr
 try:
@@ -68,6 +69,10 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str) -> str:
         return res.get("publicUrl") or res.get("public_url") or ""
     return str(res)
 
+async def _upload_pdf_and_get_public_url_async(data: bytes, path: str) -> str:
+    # Ejecuta la subida sin bloquear el event loop
+    return await asyncio.to_thread(_upload_pdf_and_get_public_url, data, path)
+
 # ---------- utilidades comunes ----------
 def _make_qr_bytes(text: str, box_size: int = 8, border: int = 1) -> bytes:
     qr = qrcode.QRCode(box_size=box_size, border=border)
@@ -86,6 +91,47 @@ def _rect_almost_equal(r1: fitz.Rect, r2: fitz.Rect, tol: float = 0.1) -> bool:
         abs(r1.x1 - r2.x1) < tol and
         abs(r1.y1 - r2.y1) < tol
     )
+
+def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: set[str]):
+    # Un solo get_text por página; retorna dict placeholder -> lista de matches
+    result = {ph: [] for ph in placeholders}
+    try:
+        d = page.get_text("dict")
+        for block in d.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    txt = span.get("text")
+                    if txt in placeholders:
+                        x0, y0, x1, y1 = span["bbox"]
+                        result[txt].append({
+                            "rect": fitz.Rect(x0, y0, x1, y1),
+                            "font": span.get("font") or "helv",
+                            "size": float(span.get("size") or 11),
+                        })
+    except Exception:
+        pass
+
+    # Complementar SIEMPRE con search_for y mergear (puede haber placeholders partidos en spans)
+    for ph in placeholders:
+        try:
+            rects = page.search_for(ph)
+            for r in rects:
+                # evitar duplicar si ya existe un rect muy similar
+                if not any(_rect_almost_equal(r, m["rect"]) for m in result[ph]):
+                    result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+        except Exception:
+            pass
+
+    # Deduplicar por placeholder
+    for ph, matches in list(result.items()):
+        dedup = []
+        out = []
+        for m in matches:
+            if not any(_rect_almost_equal(m["rect"], d["rect"]) for d in dedup):
+                dedup.append(m)
+                out.append(m)
+        result[ph] = out
+    return result
 
 def _collect_placeholder_matches_with_style(page: fitz.Page, placeholder: str):
     matches = []
@@ -153,17 +199,15 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
     MAX_SIZE = 28.0
 
     for page in doc:
-        page_matches = {}
-        for ph in list(mapping.keys()):
-            ms = _collect_placeholder_matches_with_style(page, ph)
-            if ms:
-                page_matches[ph] = ms
-                for m in ms:
-                    _add_transparent_redaction(page, m["rect"])
+        ph_set = set(list(mapping.keys()) + ["${qr}"])
+        matches_map = _collect_all_placeholder_matches_with_style(page, ph_set)
+        page_matches = {ph: matches_map.get(ph, []) for ph in mapping.keys() if matches_map.get(ph)}
+        qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
 
-        qr_matches = []
-        if qr_png is not None:
-            qr_matches = _collect_placeholder_matches_with_style(page, "${qr}")
+        for ms in page_matches.values():
+            for m in ms:
+                _add_transparent_redaction(page, m["rect"])
+        if qr_png is not None and qr_matches:
             for m in qr_matches:
                 _add_transparent_redaction(page, m["rect"])
 
@@ -224,6 +268,42 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                 page.insert_image(sq, stream=qr_png, keep_proportion=True)
 
     return total_counts
+
+_TEMPLATE_CACHE: dict[str, tuple[float, bytes]] = {}
+_TEMPLATE_TTL_SECONDS = 600  # 10 minutos
+
+async def _get_template_bytes_async(template_url: str) -> bytes:
+    # Devuelve el template desde cache si está fresco; sino lo descarga en background thread
+    now = time.time()
+    cached = _TEMPLATE_CACHE.get(template_url)
+    if cached and (now - cached[0] < _TEMPLATE_TTL_SECONDS):
+        return cached[1]
+    def _download() -> bytes:
+        resp = requests.get(template_url, timeout=20)
+        resp.raise_for_status()
+        return resp.content
+    data = await asyncio.to_thread(_download)
+    _TEMPLATE_CACHE[template_url] = (now, data)
+    return data
+
+def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str) -> tuple[bytes, dict]:
+    # Ejecuta el render del PDF (CPU-bound) en hilo aparte
+    doc = fitz.open(stream=template_bytes, filetype="pdf")
+    try:
+        qr_png = _make_qr_bytes(qr_link)
+        counts = _replace_placeholders_transparente(doc, mapping, qr_png)
+        out_buf = io.BytesIO()
+        doc.save(out_buf, garbage=4, deflate=True)
+        pdf_bytes = out_buf.getvalue()
+        return pdf_bytes, counts
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+async def _render_certificate_pdf_async(template_bytes: bytes, mapping: dict[str, str], qr_link: str) -> tuple[bytes, dict]:
+    return await asyncio.to_thread(_render_certificate_pdf_sync, template_bytes, mapping, qr_link)
 
 def _fmt_date(dt) -> str | None:
     if not dt:
@@ -587,9 +667,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
     try:
-        t_resp = requests.get(template_url, timeout=20)
-        t_resp.raise_for_status()
-        template_bytes = t_resp.content
+        template_bytes = await _get_template_bytes_async(template_url)
     except Exception as e:
         raise RuntimeError(f"No se pudo descargar el template, {e}")
 
@@ -735,7 +813,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     resultado_final = resultado_mapeo_principal if not is_second_inspection else resultado_segunda_inspeccion
     oblea = str(row["sticker_number"] or "")
     current_year_ar = datetime.now(argentina_tz).year
-    crt_numero = f"{row['application_id']}/{current_year_ar}"
+    crt_numero = f"{row['application_id']}"
 
     step_groups = {}
     for r in step_obs_rows or []:
@@ -825,21 +903,14 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     }
 
     try:
-        doc = fitz.open(stream=template_bytes, filetype="pdf")
+        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link)
     except Exception as e:
-        raise RuntimeError(f"No se pudo abrir el template PDF, {e}")
-
-    qr_png = _make_qr_bytes(qr_link)
-    counts = _replace_placeholders_transparente(doc, mapping, qr_png)
-    out_buf = io.BytesIO()
-    doc.save(out_buf, garbage=4, deflate=True)
-    doc.close()
-    pdf_bytes = out_buf.getvalue()
+        raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
 
     file_name = "certificado_2.pdf" if is_second_inspection else "certificado.pdf"
     storage_path = f"certificados/{app_id}/{file_name}"
     try:
-        public_url = _upload_pdf_and_get_public_url(pdf_bytes, storage_path)
+        public_url = await _upload_pdf_and_get_public_url_async(pdf_bytes, storage_path)
     except Exception as e:
         raise RuntimeError(f"PDF generado, no se pudo subir a Supabase Storage, {e}")
 
@@ -872,83 +943,84 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     except Exception as e:
         raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
 
-    # ----- DEBUG RESUMEN FINAL -----
-    try:
-        prov_dbg = row.get("workshop_province")
-        city_dbg = row.get("workshop_city")
-        usage_dbg = (row.get("usage_type") or "").strip().upper()
-        reg_year_dbg = row.get("car_registration_year")
-        reg_mon_raw = row.get("car_registration_month")
-        reg_mon_dbg = _parse_spanish_month(reg_mon_raw) or 1
-
-        prov_code_dbg, loc_key_dbg = _find_localidad_codes(prov_dbg, city_dbg)
-
-        # calcular antigüedad desde patentamiento contra la fecha de emisión
-        base_dbg = fecha_emision_dt.astimezone(argentina_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
-        elapsed_months_dbg = None
-        elapsed_years_dbg = None
+    # ----- DEBUG RESUMEN FINAL (opcional por env var CRT_DEBUG=1) -----
+    if os.getenv("CRT_DEBUG") == "1":
         try:
-            if reg_year_dbg:
-                elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12 + (base_dbg.month - reg_mon_dbg)
-                elapsed_months_dbg = max(0, elapsed_months_dbg)
-                elapsed_years_dbg = elapsed_months_dbg // 12
-        except Exception:
-            pass
+            prov_dbg = row.get("workshop_province")
+            city_dbg = row.get("workshop_city")
+            usage_dbg = (row.get("usage_type") or "").strip().upper()
+            reg_year_dbg = row.get("car_registration_year")
+            reg_mon_raw = row.get("car_registration_month")
+            reg_mon_dbg = _parse_spanish_month(reg_mon_raw) or 1
 
-        # obtener regla (si hay mapeo) con preferencia por match exacto y luego prefijo
-        up36_dbg = 36
-        a3_7_dbg = 24
-        o7_dbg = 12
-        used_lkey_dbg = None
-        used_usage_dbg = None
-        if prov_code_dbg and loc_key_dbg and usage_dbg:
+            prov_code_dbg, loc_key_dbg = _find_localidad_codes(prov_dbg, city_dbg)
+
+            # calcular antigüedad desde patentamiento contra la fecha de emisión
+            base_dbg = fecha_emision_dt.astimezone(argentina_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
+            elapsed_months_dbg = None
+            elapsed_years_dbg = None
             try:
-                async with get_conn_ctx() as conn:
-                    rule_dbg = await conn.fetchrow(
-                        """
-                        SELECT localidad_key, usage_code, up_to_36_months, from_3_to_7_years, over_7_years
-                        FROM inspection_validity_rules
-                        WHERE (localidad_key = $1 OR localidad_key LIKE ($1 || '%'))
-                        ORDER BY 
-                          CASE WHEN usage_code = $2 THEN 0
-                               WHEN usage_code = 'C' THEN 1
-                               ELSE 2 END,
-                          CASE WHEN localidad_key = $1 THEN 0 ELSE 1 END,
-                          localidad_key
-                        LIMIT 1
-                        """,
-                        str(loc_key_dbg),
-                        usage_dbg,
-                    )
-                if rule_dbg:
-                    used_lkey_dbg = rule_dbg["localidad_key"]
-                    used_usage_dbg = rule_dbg["usage_code"]
-                    up36_dbg = rule_dbg["up_to_36_months"] or up36_dbg
-                    a3_7_dbg = rule_dbg["from_3_to_7_years"] or a3_7_dbg
-                    o7_dbg = rule_dbg["over_7_years"] or o7_dbg
-            except Exception as e:
-                print(f"[CRT][RESUMEN] Error consultando regla para debug: {e}")
+                if reg_year_dbg:
+                    elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12 + (base_dbg.month - reg_mon_dbg)
+                    elapsed_months_dbg = max(0, elapsed_months_dbg)
+                    elapsed_years_dbg = elapsed_months_dbg // 12
+            except Exception:
+                pass
 
-        bucket_dbg = None
-        if elapsed_months_dbg is not None:
-            if elapsed_months_dbg <= 36:
-                bucket_dbg = "up_to_36"
-            elif elapsed_years_dbg is not None and 3 <= elapsed_years_dbg <= 7:
-                bucket_dbg = "3_to_7_years"
-            elif elapsed_years_dbg is not None and elapsed_years_dbg > 7:
-                bucket_dbg = "over_7_years"
+            # obtener regla (si hay mapeo) con preferencia por match exacto y luego prefijo
+            up36_dbg = 36
+            a3_7_dbg = 24
+            o7_dbg = 12
+            used_lkey_dbg = None
+            used_usage_dbg = None
+            if prov_code_dbg and loc_key_dbg and usage_dbg:
+                try:
+                    async with get_conn_ctx() as conn:
+                        rule_dbg = await conn.fetchrow(
+                            """
+                            SELECT localidad_key, usage_code, up_to_36_months, from_3_to_7_years, over_7_years
+                            FROM inspection_validity_rules
+                            WHERE (localidad_key = $1 OR localidad_key LIKE ($1 || '%'))
+                            ORDER BY 
+                              CASE WHEN usage_code = $2 THEN 0
+                                   WHEN usage_code = 'C' THEN 1
+                                   ELSE 2 END,
+                              CASE WHEN localidad_key = $1 THEN 0 ELSE 1 END,
+                              localidad_key
+                            LIMIT 1
+                            """,
+                            str(loc_key_dbg),
+                            usage_dbg,
+                        )
+                    if rule_dbg:
+                        used_lkey_dbg = rule_dbg["localidad_key"]
+                        used_usage_dbg = rule_dbg["usage_code"]
+                        up36_dbg = rule_dbg["up_to_36_months"] or up36_dbg
+                        a3_7_dbg = rule_dbg["from_3_to_7_years"] or a3_7_dbg
+                        o7_dbg = rule_dbg["over_7_years"] or o7_dbg
+                except Exception as e:
+                    print(f"[CRT][RESUMEN] Error consultando regla para debug: {e}")
 
-        print(
-            "[CRT][RESUMEN] "
-            f"Taller='{city_dbg}' ('{prov_dbg}') -> prov_code={prov_code_dbg} loc_key={loc_key_dbg}; "
-            f"rule_localidad_key_usada={used_lkey_dbg}; rule_usage_usado={used_usage_dbg}; "
-            f"usage={usage_dbg}; patentamiento={reg_year_dbg}-{reg_mon_dbg:02d}; "
-            f"antiguedad={elapsed_months_dbg}m (~{elapsed_years_dbg}a); "
-            f"meses_por_rango: up_to_36={up36_dbg}, 3_a_7={a3_7_dbg}, over_7={o7_dbg}; "
-            f"bucket_usado={bucket_dbg}; vto={fecha_vencimiento}"
-        )
-    except Exception as e:
-        print(f"[CRT][RESUMEN] Error generando resumen final: {e}")
+            bucket_dbg = None
+            if elapsed_months_dbg is not None:
+                if elapsed_months_dbg <= 36:
+                    bucket_dbg = "up_to_36"
+                elif elapsed_years_dbg is not None and 3 <= elapsed_years_dbg <= 7:
+                    bucket_dbg = "3_to_7_years"
+                elif elapsed_years_dbg is not None and elapsed_years_dbg > 7:
+                    bucket_dbg = "over_7_years"
+
+            print(
+                "[CRT][RESUMEN] "
+                f"Taller='{city_dbg}' ('{prov_dbg}') -> prov_code={prov_code_dbg} loc_key={loc_key_dbg}; "
+                f"rule_localidad_key_usada={used_lkey_dbg}; rule_usage_usado={used_usage_dbg}; "
+                f"usage={usage_dbg}; patentamiento={reg_year_dbg}-{reg_mon_dbg:02d}; "
+                f"antiguedad={elapsed_months_dbg}m (~{elapsed_years_dbg}a); "
+                f"meses_por_rango: up_to_36={up36_dbg}, 3_a_7={a3_7_dbg}, over_7={o7_dbg}; "
+                f"bucket_usado={bucket_dbg}; vto={fecha_vencimiento}"
+            )
+        except Exception as e:
+            print(f"[CRT][RESUMEN] Error generando resumen final: {e}")
 
     # devolver dict final para el job
     return {
