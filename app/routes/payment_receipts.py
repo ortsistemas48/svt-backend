@@ -4,8 +4,14 @@ from supabase import create_client, Client
 import os
 import uuid
 import datetime as dt
+import unicodedata
+import re
 
 payment_receipts_bp = Blueprint("payment_receipts", __name__, url_prefix="/payments")
+
+# Estados de órdenes de pago
+PENDING = "PENDING"
+IN_REVIEW = "IN_REVIEW"
 
 # ===== Supabase config local a este archivo =====
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -86,51 +92,67 @@ async def upload_payment_receipt(order_id: int):
         return jsonify({"error": "Formato inválido, permitidos, PNG, JPG, WEBP o PDF"}), 415
 
     client = _get_supabase_client()
-    safe_name = (f.filename or "comprobante").replace("/", "_").replace("\\", "_")
+    
+    # Sanitizar nombre del archivo para evitar problemas de encoding
+    # Normalizar caracteres Unicode y eliminar caracteres no ASCII
+    safe_name = unicodedata.normalize("NFD", (f.filename or "comprobante")).encode("ascii", "ignore").decode("ascii")
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", safe_name).strip("-.")
+    if not safe_name:
+        safe_name = "comprobante"
+    
     dest = f"comprobantes/payments/{order_id}/{uuid.uuid4().hex}-{safe_name}"
 
-    # file_options: SOLO strings
+    # file_options: usar content_type (no content-type) y x-upsert como string
     file_options = {
-        "content-type": mime,
-        "cache-control": "3600",
-        "content-disposition": f'inline; filename="{safe_name}"',
+        "content_type": mime,
+        "x-upsert": "true",
     }
 
-    # 1) Intento moderno: upsert como kwarg (supabase-py reciente)
-    try:
-        client.storage.from_(BUCKET_DOCS).upload(
-            path=dest,
-            file=data,
-            file_options=file_options,
-            upsert=True,  # ← NO va dentro de file_options
-        )
-    except TypeError:
-        # 2) Fallback para versiones que no aceptan kwarg upsert
-        # usar header x-upsert pero en STRING, no bool
-        file_options["x-upsert"] = "true"
-        client.storage.from_(BUCKET_DOCS).upload(
-            path=dest,
-            file=data,
-            file_options=file_options,
-        )
+    client.storage.from_(BUCKET_DOCS).upload(
+        path=dest,
+        file=data,
+        file_options=file_options,
+    )
 
     url = _public_url(BUCKET_DOCS, dest)
-    # guardar en la orden
+    # guardar en la orden y cambiar estado de PENDING a IN_REVIEW si corresponde
+    # Reutilizamos el estado obtenido anteriormente en la validación
+    current_status = order["status"]
+    
     async with get_conn_ctx() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE payment_orders
-            SET
-              receipt_url = $1,
-              receipt_mime = $2,
-              receipt_size = $3,
-              receipt_uploaded_at = NOW(),
-              updated_at = NOW()
-            WHERE id = $4
-            RETURNING id, workshop_id, status, receipt_url, receipt_mime, receipt_size, receipt_uploaded_at
-            """,
-            url, mime, len(data), order_id
-        )
+        # Si el estado actual es PENDING, cambiar a IN_REVIEW al subir el comprobante
+        if current_status == PENDING:
+            row = await conn.fetchrow(
+                """
+                UPDATE payment_orders
+                SET
+                  receipt_url = $1,
+                  receipt_mime = $2,
+                  receipt_size = $3,
+                  receipt_uploaded_at = NOW(),
+                  status = $4,
+                  updated_at = NOW()
+                WHERE id = $5
+                RETURNING id, workshop_id, status, receipt_url, receipt_mime, receipt_size, receipt_uploaded_at
+                """,
+                url, mime, len(data), IN_REVIEW, order_id
+            )
+        else:
+            # Si no es PENDING, solo actualizar los campos del comprobante sin cambiar el estado
+            row = await conn.fetchrow(
+                """
+                UPDATE payment_orders
+                SET
+                  receipt_url = $1,
+                  receipt_mime = $2,
+                  receipt_size = $3,
+                  receipt_uploaded_at = NOW(),
+                  updated_at = NOW()
+                WHERE id = $4
+                RETURNING id, workshop_id, status, receipt_url, receipt_mime, receipt_size, receipt_uploaded_at
+                """,
+                url, mime, len(data), order_id
+            )
 
     return jsonify({
         "message": "Comprobante subido",

@@ -777,13 +777,12 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         fecha_emision_dt = insp_created_at
     else:
         fecha_emision_dt = insp_created_at or row["app_date"]
-    print("fecha_emision_dt", fecha_emision_dt)
     fecha_emision = _fmt_date(fecha_emision_dt)
     fecha_vencimiento = None
     vto_dt_for_db = None
     if fecha_emision_dt:
         if condicion == "Condicional":
-            vto_dt_for_db = fecha_emision_dt + timedelta(days=60)
+            vto_dt_for_db = fecha_emision_dt + timedelta(days=59)
         elif condicion == "Rechazado":
             vto_dt_for_db = None
         else:

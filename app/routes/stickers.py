@@ -385,7 +385,7 @@ async def create_sticker_order():
     Crea una orden y hace bulk-insert de obleas.
     Body JSON:
       - workshop_id: int, requerido
-      - name: str, requerido
+      - name: str, opcional (si no se proporciona, se genera automáticamente como "obleas-{orderId}")
       - note: str, opcional
       - stickers: [str], requerido
       - expiration_date: "YYYY-MM-DD" o null, opcional, se aplica a todas
@@ -399,8 +399,6 @@ async def create_sticker_order():
 
     if not isinstance(workshop_id, int):
         return jsonify({"error": "workshop_id requerido"}), 400
-    if not name:
-        return jsonify({"error": "name requerido"}), 400
     if not isinstance(stickers, list) or len(stickers) == 0:
         return jsonify({"error": "stickers debe ser lista no vacía"}), 400
 
@@ -430,6 +428,17 @@ async def create_sticker_order():
                 workshop_id, name, note
             )
             order_id = order_row["id"]
+            
+            # Si el nombre está vacío, generar automáticamente con formato obleas-{orderId}
+            if not name:
+                auto_name = f"obleas-{order_id}"
+                await conn.execute(
+                    "UPDATE sticker_orders SET name = $1 WHERE id = $2",
+                    auto_name, order_id
+                )
+                # Actualizar order_row para usar el nombre generado en la respuesta
+                order_row = dict(order_row)
+                order_row["name"] = auto_name
 
             existing = await conn.fetch(
                 "SELECT sticker_number FROM stickers WHERE sticker_number = ANY($1::text[])",

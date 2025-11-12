@@ -62,6 +62,7 @@ async def create_order():
     zone = (data.get("zone") or "").upper()
     unit_price = float(data.get("unit_price") or 0)
     amount = float(data.get("amount") or 0)
+    status_param = (data.get("status") or "").upper()
 
     if not workshop_id:
         return jsonify({"error": "workshop_id requerido"}), 400
@@ -71,6 +72,16 @@ async def create_order():
         return jsonify({"error": "Zona inválida"}), 400
     if unit_price <= 0 or amount <= 0:
         return jsonify({"error": "Montos inválidos"}), 400
+
+    # Determinar el estado inicial de la orden
+    # Si status no se envía o es "PENDING" → crear orden como "Pendiente de pago" (PENDING)
+    # Si status es "IN_REVIEW" → crear orden como "Pendiente de acreditación" (IN_REVIEW)
+    if not status_param or status_param == "PENDING":
+        initial_status = PENDING
+    elif status_param == "IN_REVIEW":
+        initial_status = IN_REVIEW
+    else:
+        return jsonify({"error": "status inválido, valores permitidos: PENDING, IN_REVIEW"}), 400
 
     async with get_conn_ctx() as conn:
         if not await _user_belongs_to_workshop(conn, user_id, workshop_id):
@@ -82,7 +93,7 @@ async def create_order():
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id, workshop_id, quantity, unit_price, amount, zone, status, created_at
             """,
-            workshop_id, quantity, unit_price, amount, zone, PENDING
+            workshop_id, quantity, unit_price, amount, zone, initial_status
         )
 
     return jsonify({"ok": True, "order": dict(row)}), 201
