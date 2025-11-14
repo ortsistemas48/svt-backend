@@ -836,7 +836,7 @@ async def list_pending_workshops():
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
+            SELECT id, name, razon_social , disposition_number, province, city, phone, cuit, plant_number, address
             FROM workshop
             WHERE is_approved = false
             ORDER BY id DESC
@@ -1170,8 +1170,10 @@ async def admin_list_workshop_members(workshop_id: int):
               u.email,
               u.dni,
               u.phone_number,
-              ut.name             AS role,
-              wu.user_type_id,
+              u.title_name,
+              u.license_number,
+              ut.name as role,
+              wu.engineer_kind,
               wu.created_at
             FROM workshop_users wu
             JOIN users u      ON u.id = wu.user_id
