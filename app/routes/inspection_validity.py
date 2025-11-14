@@ -169,11 +169,23 @@ async def bulk_apply_inspection_validity(province_code: str):
     payload = await request.get_json() or {}
     loc_keys = payload.get("localidad_keys") or []
     values = payload.get("values") or {}
+    usage_codes = payload.get("usage_codes")
 
     if not isinstance(loc_keys, list) or not all(isinstance(x, str) for x in loc_keys):
         return jsonify({"error": "localidad_keys debe ser string[]"}), 400
     if not loc_keys:
         return jsonify({"error": "Debe indicar al menos una localidad"}), 400
+
+    # Validación de usage_codes opcional: debe ser subset de USAGE_CODES
+    if usage_codes is not None:
+        if not isinstance(usage_codes, list) or not usage_codes or not all(isinstance(x, str) for x in usage_codes):
+            return jsonify({"error": "usage_codes debe ser string[] no vacío"}), 400
+        invalid = [x for x in usage_codes if x not in USAGE_CODES]
+        if invalid:
+            return jsonify({"error": f"usage_codes inválidos: {', '.join(invalid)}"}), 400
+        codes_to_apply = set(usage_codes)
+    else:
+        codes_to_apply = USAGE_CODES
 
     # Solo aplicamos los campos presentes; los ausentes se dejan como None para usar COALESCE en UPDATE
     apply_up36 = "up_to_36" in values
@@ -196,9 +208,9 @@ async def bulk_apply_inspection_validity(province_code: str):
 
     async with get_conn_ctx() as conn:
         async with conn.transaction():
-            # Aplicamos a cada localidad y a todos los usage_codes
+            # Aplicamos a cada localidad y a los usage_codes seleccionados (o todos si no se especificaron)
             for lk in loc_keys:
-                for usage_code in USAGE_CODES:
+                for usage_code in codes_to_apply:
                     # Insertamos valores (pueden venir NULL si no se proveen) y en conflicto actualizamos sólo los campos presentes
                     await conn.execute(
                         f"""
