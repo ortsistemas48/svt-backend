@@ -178,7 +178,7 @@ async def register_bulk():
     dni              = (data.get("dni") or None)
     phone_number     = (data.get("phone_number") or None)
     workshop_id      = data.get("workshop_id")
-    user_type_id     = data.get("user_type_id")  # se usa sólo para saber si es ingeniero
+    user_type_id     = data.get("user_type_id")  
 
     license_number = data.get("license_number") or data.get("nro_matricula")
     title_name     = data.get("title_name")     or data.get("titulo_universitario")
@@ -201,10 +201,9 @@ async def register_bulk():
         if engineer_kind not in ("Titular", "Suplente"):
             return jsonify({"error": "Elegí si el ingeniero es Titular o Suplente"}), 400
 
-    inviter_id = g.get("user_id")  # quién ejecuta el alta, opcional
+    inviter_id = g.get("user_id") 
 
     async with get_conn_ctx() as conn:
-        # Validaciones previas y datos auxiliares
         existing_user = await conn.fetchrow("SELECT 1 FROM users WHERE email = $1", email)
         if existing_user:
             return jsonify({"error": "El email ya está en uso"}), 400
@@ -245,22 +244,20 @@ async def register_bulk():
             )
             user_id = user_row["id"]
 
-            # Relación workshop_users SIN user_type_id
             await conn.execute(
                 """
-                INSERT INTO workshop_users (workshop_id, user_id, engineer_kind, created_at)
-                VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-                ON CONFLICT (workshop_id, user_id) DO UPDATE SET engineer_kind = EXCLUDED.engineer_kind
+                INSERT INTO workshop_users (workshop_id, user_id, user_type_id, engineer_kind, created_at)
+                VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+                ON CONFLICT (workshop_id, user_id)
+                DO UPDATE SET 
+                    user_type_id = EXCLUDED.user_type_id,
+                    engineer_kind = EXCLUDED.engineer_kind
                 """,
-                workshop_id, user_id, engineer_kind
+                workshop_id, user_id, user_type_id, engineer_kind
             )
 
-    # =========================
-    # Envío de emails (fuera TX)
-    # =========================
     full_name = f"{first_name} {last_name}".strip()
     try:
-        # 1) Credenciales de cuenta
         displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
         login_url = f"{FRONTEND_URL}/login"
         force_reset_url = f"{FRONTEND_URL}/reset-password?email={email}"
@@ -277,7 +274,6 @@ async def register_bulk():
         log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
 
     try:
-        # 2) Asignación a taller (rol descriptivo derivado)
         workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
         role_name = f"Ingeniero {engineer_kind}" if is_engineer else None
         await send_assigned_to_workshop_email(
