@@ -16,6 +16,7 @@ workshops_bp = Blueprint("workshops", __name__, url_prefix="/workshops")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 OWNER_ROLE_ID = 2
+ENGINEER_ROLE_ID = 3
 VALID_PROVINCES = {
     "Buenos Aires","CABA","Catamarca","Chaco","Chubut","Córdoba","Corrientes",
     "Entre Ríos","Formosa","Jujuy","La Pampa","La Rioja","Mendoza","Misiones",
@@ -1586,6 +1587,11 @@ async def set_member_role(workshop_id: int, member_user_id):
     data = await request.get_json() or {}
     role_name = (data.get("role") or "").strip()
     role_id = data.get("user_type_id")
+    
+    # Campos adicionales para rol Ingeniero
+    title_name = (data.get("title_name") or "").strip()
+    licence_number = (data.get("licence_number") or data.get("license_number") or "").strip()
+    engineer_kind = (data.get("engineer_kind") or "").strip()
 
     async with get_conn_ctx() as conn:
         # Permisos, admin o OWNER del mismo taller
@@ -1627,6 +1633,32 @@ async def set_member_role(workshop_id: int, member_user_id):
             if not role_row:
                 return jsonify({"error": f"Rol inválido, no existe '{role_name}'"}), 400
             role_id = role_row["id"]
+        
+        # Validar campos adicionales si el rol es Ingeniero
+        is_engineer = int(role_id) == ENGINEER_ROLE_ID
+        if is_engineer:
+            if not title_name:
+                return jsonify({"error": "Para el rol Ingeniero, se requiere title_name"}), 400
+            if not licence_number:
+                return jsonify({"error": "Para el rol Ingeniero, se requiere licence_number"}), 400
+            if engineer_kind not in ("Titular", "Suplente"):
+                return jsonify({"error": "engineer_kind debe ser 'Titular' o 'Suplente'"}), 400
+            
+            # Validar que no haya otro Ingeniero Titular en el taller (excepto el mismo usuario)
+            if engineer_kind == "Titular":
+                existing_titular = await conn.fetchrow(
+                    """
+                    SELECT user_id
+                    FROM workshop_users
+                    WHERE workshop_id = $1
+                      AND user_type_id = $2
+                      AND engineer_kind = 'Titular'
+                      AND user_id != $3::uuid
+                    """,
+                    workshop_id, ENGINEER_ROLE_ID, str(member_user_id)
+                )
+                if existing_titular:
+                    return jsonify({"error": "Ya existe un Ingeniero Titular asignado a este taller"}), 409
 
         # Evitar dejar al taller sin OWNER si estamos bajando al último OWNER
         if exists_target["current_role"] == OWNER_ROLE_ID and role_id != OWNER_ROLE_ID:
@@ -1641,14 +1673,37 @@ async def set_member_role(workshop_id: int, member_user_id):
 
         # Guardar cambio y loguear
         async with conn.transaction():
-            await conn.execute(
-                """
-                UPDATE workshop_users
-                SET user_type_id = $3
-                WHERE workshop_id = $1 AND user_id = $2::uuid
-                """,
-                workshop_id, str(member_user_id), int(role_id)
-            )
+            # Actualizar rol en workshop_users
+            if is_engineer:
+                await conn.execute(
+                    """
+                    UPDATE workshop_users
+                    SET user_type_id = $3, engineer_kind = $4
+                    WHERE workshop_id = $1 AND user_id = $2::uuid
+                    """,
+                    workshop_id, str(member_user_id), int(role_id), engineer_kind
+                )
+            else:
+                # Si no es ingeniero, limpiar engineer_kind
+                await conn.execute(
+                    """
+                    UPDATE workshop_users
+                    SET user_type_id = $3, engineer_kind = NULL
+                    WHERE workshop_id = $1 AND user_id = $2::uuid
+                    """,
+                    workshop_id, str(member_user_id), int(role_id)
+                )
+            
+            # Actualizar campos en tabla users si es Ingeniero
+            if is_engineer:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET title_name = $1, license_number = $2
+                    WHERE id = $3::uuid
+                    """,
+                    title_name, licence_number, str(member_user_id)
+                )
 
             meta = {
                 "ip": request.headers.get("X-Forwarded-For") or request.remote_addr,
@@ -1657,6 +1712,11 @@ async def set_member_role(workshop_id: int, member_user_id):
                 "new_role_id": int(role_id),
                 "new_role_name": role_name or None,
             }
+            if is_engineer:
+                meta["title_name"] = title_name
+                meta["license_number"] = licence_number
+                meta["engineer_kind"] = engineer_kind
+            
             await conn.execute(
                 """
                 INSERT INTO workshop_user_logs
