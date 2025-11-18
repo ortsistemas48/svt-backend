@@ -3,7 +3,7 @@ from app.db import get_conn_ctx
 from asyncpg.exceptions import UniqueViolationError
 from uuid import UUID
 import json
-from app.email import send_workshop_pending_email, send_workshop_approved_email
+from app.email import send_workshop_pending_email, send_workshop_approved_email, send_admin_workshop_registered_email
 import logging
 import os
 import asyncio
@@ -741,6 +741,25 @@ async def create_workshop_unapproved():
             user_id,
         )
 
+    # Notificar a administradores sobre nuevo taller
+    try:
+        admin_emails = []
+        async with get_conn_ctx() as conn:
+            rows = await conn.fetch(
+                "SELECT email FROM users WHERE COALESCE(is_admin,false) = true AND COALESCE(email,'') <> ''"
+            )
+            admin_emails = [r["email"] for r in rows]
+        for em in admin_emails:
+            asyncio.create_task(
+                send_admin_workshop_registered_email(
+                    to_email=em,
+                    workshop_name=name,
+                    workshop_id=ws_id,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudieron encolar notificaciones a admins por nuevo taller %s: %s", ws_id, e)
+
     # armamos respuesta para el front
     out = {
         "id": row["id"],
@@ -985,6 +1004,25 @@ async def create_workshop():
                 msg = "Ya existe un taller con ese CUIT"
             return jsonify({"error": msg}), 409
 
+    # Notificar a administradores sobre nuevo taller
+    try:
+        admin_emails = []
+        async with get_conn_ctx() as conn:
+            rows = await conn.fetch(
+                "SELECT email FROM users WHERE COALESCE(is_admin,false) = true AND COALESCE(email,'') <> ''"
+            )
+            admin_emails = [r["email"] for r in rows]
+        for em in admin_emails:
+            asyncio.create_task(
+                send_admin_workshop_registered_email(
+                    to_email=em,
+                    workshop_name=name,
+                    workshop_id=ws_id,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudieron encolar notificaciones a admins por nuevo taller %s: %s", ws_id, e)
+
     return jsonify({
         "message": "Workshop creado",
         "workshop": dict(row),
@@ -994,6 +1032,9 @@ async def create_workshop():
             "user_type_id": OWNER_ROLE_ID
         }
     }), 201
+
+    # Nota: mantener notificaciones antes del return
+
 
 # ====== Verificar membresía del usuario en un taller ======
 @workshops_bp.route("/<int:workshop_id>/membership", methods=["GET"])

@@ -1,9 +1,13 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
+from app.email import send_admin_ticket_created_email, send_admin_ticket_message_email
 import datetime
 import pytz
+import asyncio
+import logging
 
 tickets_bp = Blueprint("tickets", __name__)
+log = logging.getLogger(__name__)
 
 
 @tickets_bp.route("/workshop/<int:workshop_id>", methods=["GET"])
@@ -114,6 +118,24 @@ async def create_ticket():
                 # Si la tabla no existe o hay error, no rompemos la creación del ticket
                 pass
 
+    # Notificar a administradores sobre ticket nuevo
+    try:
+        subject_text = subject
+        async with get_conn_ctx() as conn:
+            admins = await conn.fetch("SELECT email FROM users WHERE COALESCE(is_admin,false) = true AND COALESCE(email,'') <> ''")
+        for r in admins:
+            em = r["email"]
+            asyncio.create_task(
+                send_admin_ticket_created_email(
+                    to_email=em,
+                    ticket_id=int(ticket_id),
+                    workshop_id=int(workshop_id),
+                    subject_text=subject_text,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudieron encolar notificaciones a admins por ticket %s: %s", ticket_id, e)
+
     return jsonify({"message": "Ticket creado", "ticket_id": ticket_id}), 201
 
 
@@ -221,6 +243,7 @@ async def create_ticket_message(ticket_id: int):
     argentina_tz = pytz.timezone('America/Argentina/Buenos_Aires')
     now_arg = datetime.datetime.now(argentina_tz)
 
+    workshop_id = None
     async with get_conn_ctx() as conn:
         owner_id = await conn.fetchval(
             "SELECT created_by_user_id FROM support_tickets WHERE id = $1",
@@ -228,6 +251,8 @@ async def create_ticket_message(ticket_id: int):
         )
         if str(owner_id) != str(user_id):
             return jsonify({"error": "No autorizado"}), 403
+
+        workshop_id = await conn.fetchval("SELECT workshop_id FROM support_tickets WHERE id = $1", ticket_id)
 
         msg_id = await conn.fetchval(
             """
@@ -237,6 +262,23 @@ async def create_ticket_message(ticket_id: int):
             """,
             ticket_id, user_id, content, now_arg
         )
+
+    # Notificar a administradores sobre nuevo mensaje en ticket
+    try:
+        async with get_conn_ctx() as conn:
+            admins = await conn.fetch("SELECT email FROM users WHERE COALESCE(is_admin,false) = true AND COALESCE(email,'') <> ''")
+        for r in admins:
+            em = r["email"]
+            asyncio.create_task(
+                send_admin_ticket_message_email(
+                    to_email=em,
+                    ticket_id=int(ticket_id),
+                    workshop_id=int(workshop_id or 0),
+                    message_preview=content,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudieron encolar notificaciones a admins por mensaje en ticket %s: %s", ticket_id, e)
 
     return jsonify({"message": "Enviado", "id": msg_id}), 201
 

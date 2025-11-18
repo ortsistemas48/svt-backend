@@ -128,6 +128,114 @@ async def send_workshop_approved_email(to_email: str, workshop_name: str, worksh
     return await _send_email(to_email, subject, html)
 
 # ================================================
+# 3b) Pago de orden aprobado
+# ================================================
+async def send_payment_order_approved_email(
+    to_email: str,
+    workshop_name: str,
+    quantity: int,
+    workshop_id: Optional[int] = None,
+):
+    url = f"{FRONTEND_URL}/dashboard/{workshop_id}/payment" if workshop_id else f"{FRONTEND_URL}/select-workshop"
+    subject = "Aprobamos tu pago"
+    intro = (
+        f"Aprobamos y acreditamos tu pago por {quantity} revisiones del taller {workshop_name}. "
+        "Ya podés continuar normalmente."
+    )
+    html = _wrap_html(
+        title="Pago acreditado",
+        intro=intro,
+        cta_text="Ver órdenes de pago",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+# ================================================
+# 3c) Notificaciones para administradores
+# ================================================
+async def send_admin_workshop_registered_email(
+    to_email: str,
+    workshop_name: str,
+    workshop_id: int,
+):
+    subject = "Nuevo taller registrado"
+    intro = f"Se registró el taller {workshop_name} (ID {workshop_id}). Revisá los datos y aprobalo si corresponde."
+    url = f"{FRONTEND_URL}/admin-dashboard/approve-workshops"
+    html = _wrap_html(
+        title="Nuevo taller registrado",
+        intro=intro,
+        cta_text="Abrir aprobaciones",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+async def send_admin_payment_order_created_email(
+    to_email: str,
+    workshop_name: str,
+    workshop_id: int,
+    order_id: int,
+    quantity: int,
+    amount: float,
+    zone: str,
+):
+    subject = "Nueva orden de pago registrada"
+    intro = (
+        f"Se creó la orden #{order_id} del taller {workshop_name} "
+        f"por {quantity} revisiones, zona {zone}, monto ${amount:,.2f}."
+    )
+    url = f"{FRONTEND_URL}/admin-dashboard/payments"
+    html = _wrap_html(
+        title="Orden de pago registrada",
+        intro=intro,
+        cta_text="Ver pagos",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+async def send_admin_ticket_created_email(
+    to_email: str,
+    ticket_id: int,
+    workshop_id: int,
+    subject_text: str,
+):
+    subject = "Nuevo ticket creado"
+    intro = (
+        f"Se creó el ticket #{ticket_id} para el taller {workshop_id} "
+        f"con asunto: “{subject_text}”."
+    )
+    url = f"{FRONTEND_URL}/admin-dashboard/support/{ticket_id}"
+    html = _wrap_html(
+        title="Nuevo ticket",
+        intro=intro,
+        cta_text="Abrir ticket",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+async def send_admin_ticket_message_email(
+    to_email: str,
+    ticket_id: int,
+    workshop_id: int,
+    message_preview: str,
+):
+    subject = "Nuevo mensaje en ticket"
+    preview = (message_preview or "").strip()
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    intro = (
+        f"Nuevo mensaje en el ticket #{ticket_id} (taller {workshop_id}). "
+        f"Contenido: “{preview}”"
+    )
+    url = f"{FRONTEND_URL}/admin-dashboard/support/{ticket_id}"
+    html = _wrap_html(
+        title="Nuevo mensaje en ticket",
+        intro=intro,
+        cta_text="Ver conversación",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+# ================================================
 # 4) Email de credenciales al crear la cuenta
 # ================================================
 async def send_account_credentials_email(

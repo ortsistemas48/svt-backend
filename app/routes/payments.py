@@ -1,14 +1,21 @@
 # app/blueprints/payments.py
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
+from app.email import send_payment_order_approved_email, send_admin_payment_order_created_email
+import logging
+import asyncio
 
 payments_bp = Blueprint("payments", __name__, url_prefix="/payments")
+log = logging.getLogger(__name__)
 
 # Estados
 PENDING = "PENDING"
 IN_REVIEW = "IN_REVIEW"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
+
+# Roles
+OWNER_ROLE_ID = 2
 
 # Helpers
 async def _user_belongs_to_workshop(conn, user_id: int, workshop_id: int) -> bool:
@@ -83,9 +90,13 @@ async def create_order():
     else:
         return jsonify({"error": "status inválido, valores permitidos: PENDING, IN_REVIEW"}), 400
 
+    ws_name = None
     async with get_conn_ctx() as conn:
         if not await _user_belongs_to_workshop(conn, user_id, workshop_id):
             return jsonify({"error": "No tenés acceso a este taller"}), 403
+
+        ws = await conn.fetchrow("SELECT name FROM workshop WHERE id = $1", workshop_id)
+        ws_name = ws["name"] if ws else None
 
         row = await conn.fetchrow(
             """
@@ -95,6 +106,29 @@ async def create_order():
             """,
             workshop_id, quantity, unit_price, amount, zone, initial_status
         )
+
+    # Notificar a administradores sobre nueva orden de pago
+    try:
+        admin_emails = []
+        async with get_conn_ctx() as conn:
+            rows = await conn.fetch(
+                "SELECT email FROM users WHERE COALESCE(is_admin,false) = true AND COALESCE(email,'') <> ''"
+            )
+            admin_emails = [r["email"] for r in rows]
+        for em in admin_emails:
+            asyncio.create_task(
+                send_admin_payment_order_created_email(
+                    to_email=em,
+                    workshop_name=ws_name or str(workshop_id),
+                    workshop_id=workshop_id,
+                    order_id=row["id"],
+                    quantity=quantity,
+                    amount=amount,
+                    zone=zone,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudieron encolar notificaciones a admins por nueva orden %s: %s", row["id"], e)
 
     return jsonify({"ok": True, "order": dict(row)}), 201
 
@@ -158,14 +192,19 @@ async def admin_set_status(order_id: int):
     if new_status not in (APPROVED, REJECTED, IN_REVIEW, PENDING):
         return jsonify({"error": "Estado inválido"}), 400
 
+    owner_emails = []
+    ws_name = None
+    ws_id = None
+    qty = None
+    should_notify = False
+
     async with get_conn_ctx() as conn:
-        # reemplazá por tu verificación real de admin
         is_admin = await conn.fetchval("SELECT COALESCE(is_admin, false) FROM users WHERE id = $1", user_id)
         if not is_admin:
             return jsonify({"error": "Requiere admin"}), 403
 
-        exists = await conn.fetchval("SELECT 1 FROM payment_orders WHERE id = $1", order_id)
-        if not exists:
+        current = await conn.fetchrow("SELECT workshop_id, status, quantity FROM payment_orders WHERE id = $1", order_id)
+        if not current:
             return jsonify({"error": "Orden no encontrada"}), 404
 
         row = await conn.fetchrow(
@@ -177,5 +216,41 @@ async def admin_set_status(order_id: int):
             """,
             new_status, order_id
         )
+
+        # Preparar datos para notificación por email si corresponde
+        if new_status == APPROVED and (current["status"] or "").upper() != APPROVED:
+            ws_id = current["workshop_id"]
+            qty = int(current["quantity"] or 0)
+
+            # Obtener emails de los OWNERS del taller
+            owners = await conn.fetch(
+                """
+                SELECT u.email
+                FROM workshop_users wu
+                JOIN users u ON u.id = wu.user_id
+                WHERE wu.workshop_id = $1 AND wu.user_type_id = $2 AND COALESCE(u.email, '') <> ''
+                """,
+                ws_id, OWNER_ROLE_ID
+            )
+            owner_emails = [r["email"] for r in owners]
+
+            # Nombre del taller
+            ws = await conn.fetchrow("SELECT name FROM workshop WHERE id = $1", ws_id)
+            ws_name = ws["name"] if ws else None
+
+            should_notify = bool(owner_emails and ws_name)
+
+    # Enviar emails fuera de la transacción
+    if should_notify:
+        for em in owner_emails:
+            try:
+                await send_payment_order_approved_email(
+                    to_email=em,
+                    workshop_name=ws_name,
+                    quantity=qty or 0,
+                    workshop_id=ws_id,
+                )
+            except Exception as e:
+                log.exception("No se pudo enviar email de pago aprobado a %s, error: %s", em, e)
 
     return jsonify({"ok": True, "order": dict(row)}), 200
