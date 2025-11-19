@@ -684,6 +684,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             o.first_name AS owner_first_name,
             o.last_name  AS owner_last_name,
             o.dni        AS owner_dni,
+            o.cuit       AS owner_cuit,
+            o.razon_social AS owner_razon_social,
             o.street     AS owner_street,
             o.city       AS owner_city,
             o.province   AS owner_province,
@@ -691,6 +693,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             d.first_name AS driver_first_name,
             d.last_name  AS driver_last_name,
             d.dni        AS driver_dni,
+            d.cuit       AS driver_cuit,
 
             c.license_plate    AS car_plate,
             c.brand            AS car_brand,
@@ -765,8 +768,37 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     is_second_inspection = bool(insp and insp.get("is_second"))
 
-    owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
-    documento = row["owner_dni"] or row["driver_dni"]
+    # Nombre base del titular (persona física)
+    base_owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
+
+    # Selección de documento con prioridad:
+    # 1) owner CUIT, 2) owner DNI, 3) driver DNI, 4) driver CUIT
+    documento = None
+    documento_label = "D.N.I."
+    using_cuit = False
+    if row.get("owner_cuit"):
+        documento = row["owner_cuit"]
+        documento_label = "CUIT"
+        using_cuit = True
+    elif row.get("owner_dni"):
+        documento = row["owner_dni"]
+        documento_label = "D.N.I."
+        using_cuit = False
+    elif row.get("driver_dni"):
+        documento = row["driver_dni"]
+        documento_label = "D.N.I."
+        using_cuit = False
+    elif row.get("driver_cuit"):
+        documento = row["driver_cuit"]
+        documento_label = "CUIT"
+        using_cuit = True
+
+    # Si se está usando CUIT, el owner_fullname será la razón social (si existe)
+    if using_cuit and (row.get("owner_razon_social")):
+        owner_fullname = row["owner_razon_social"]
+    else:
+        owner_fullname = base_owner_fullname
+
     domicilio = row["owner_street"]
     localidad = row["owner_city"]
     provincia = row["owner_province"]
@@ -873,7 +905,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      f"{owner_fullname} (D.N.I. {str(documento)}) , TITULAR" or "",
+        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) , TITULAR" or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
