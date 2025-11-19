@@ -3,8 +3,38 @@ from app.db import get_conn_ctx
 import datetime
 from dateutil import parser
 import pytz
+import re
 
 applications_bp = Blueprint("applications", __name__)
+
+
+def validate_dni_cuit(dni=None, cuit=None, razon_social=None):
+    """
+    Valida DNI y CUIT según las reglas:
+    - Si se envía CUIT, debe tener exactamente 11 dígitos
+    - Si se envía CUIT, razon_social es obligatorio
+    - Si se envía DNI, debe tener máximo 9 dígitos
+    Retorna (error_message, status_code) o (None, None) si es válido
+    """
+    if cuit:
+        # Validar que CUIT tenga exactamente 11 dígitos
+        cuit_clean = re.sub(r'\D', '', str(cuit))
+        if len(cuit_clean) != 11:
+            return "CUIT debe tener exactamente 11 dígitos", 400
+        
+        # Si se envía CUIT, razon_social es obligatorio
+        if not razon_social or not razon_social.strip():
+            return "razon_social es obligatorio cuando se envía CUIT", 400
+    
+    if dni:
+        # Validar que DNI tenga máximo 9 dígitos
+        dni_clean = re.sub(r'\D', '', str(dni))
+        if len(dni_clean) > 9:
+            return "DNI debe tener máximo 9 dígitos", 400
+        if len(dni_clean) == 0:
+            return "DNI no puede estar vacío", 400
+    
+    return None, None
 
 # Paso 1: Crear trámite vacío vinculado al user actual
 @applications_bp.route("/applications", methods=["POST"])
@@ -40,26 +70,63 @@ async def add_or_update_owner(app_id):
     data = await request.get_json()
     app_id = int(app_id)
     
-    # Validar que se proporcione DNI
+    # Obtener DNI y CUIT (al menos uno debe estar presente)
     dni = data.get("dni")
-    if not dni:
-        return jsonify({"error": "DNI es requerido"}), 400
+    cuit = data.get("cuit")
+    razon_social = data.get("razon_social") or data.get("razonSocial")
+    
+    # Verificar si DNI fue enviado explícitamente (incluso si está vacío)
+    dni_was_sent = "dni" in data
+    cuit_was_sent = "cuit" in data
+    razon_social_was_sent = "razon_social" in data or "razonSocial" in data
+    
+    if not dni_was_sent and not cuit_was_sent:
+        return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
+    
+    # Validar DNI/CUIT y razon_social
+    error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
+    if error_msg:
+        return jsonify({"error": error_msg}), status_code
+    
+    # Limpiar DNI y CUIT (solo dígitos)
+    # Si DNI fue enviado pero está vacío, dni_clean será None (para actualizar a NULL)
+    # Si DNI no fue enviado, dni_clean será None pero no lo actualizaremos
+    dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+    cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
     
     async with get_conn_ctx() as conn:
-        # Verificar si ya existe una persona con este DNI
-        existing_person_id = await conn.fetchval(
-            "SELECT id FROM persons WHERE dni = $1", dni
-        )
+        # Buscar persona existente por DNI o CUIT
+        existing_person_id = None
+        if dni_clean:
+            existing_person_id = await conn.fetchval(
+                "SELECT id FROM persons WHERE dni = $1", dni_clean
+            )
+        if not existing_person_id and cuit_clean:
+            existing_person_id = await conn.fetchval(
+                "SELECT id FROM persons WHERE cuit = $1", cuit_clean
+            )
         
         if existing_person_id:
+            # Obtener valores actuales si no fueron enviados para mantenerlos
+            current_person = await conn.fetchrow(
+                "SELECT dni, cuit, razon_social FROM persons WHERE id = $1", existing_person_id
+            )
+            
+            # Determinar valores finales: si fue enviado, usar el nuevo (puede ser NULL); si no, mantener el actual
+            final_dni = dni_clean if dni_was_sent else current_person["dni"]
+            final_cuit = cuit_clean if cuit_was_sent else current_person["cuit"]
+            final_razon_social = razon_social if razon_social_was_sent else current_person["razon_social"]
+            
             # Usar la persona existente y actualizar sus datos
             await conn.execute("""
                 UPDATE persons
                 SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, is_owner = TRUE
-                WHERE id = $8
+                    city = $6, province = $7, is_owner = TRUE, dni = $8, 
+                    cuit = $9, razon_social = $10
+                WHERE id = $11
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), existing_person_id)
+                data.get("address"), data.get("city"), data.get("province"), 
+                final_dni, final_cuit, final_razon_social, existing_person_id)
             
             # Asignar la persona existente a la aplicación
             await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", existing_person_id, app_id)
@@ -67,11 +134,12 @@ async def add_or_update_owner(app_id):
         else:
             # Crear nueva persona solo si no existe
             owner_id = await conn.fetchval("""
-                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, is_owner)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
+                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, is_owner)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), dni)
+                data.get("address"), data.get("city"), data.get("province"), 
+                dni_clean, cuit_clean, razon_social)
             
             await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", owner_id, app_id)
 
@@ -93,25 +161,62 @@ async def add_or_update_driver(app_id):
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", owner_id, app_id)
             return jsonify({"message": "Conductor asignado como titular", "person_id": owner_id}), 200
 
-        # Validar que se proporcione DNI
+        # Obtener DNI y CUIT (al menos uno debe estar presente)
         dni = data.get("dni")
-        if not dni:
-            return jsonify({"error": "DNI es requerido"}), 400
-
-        # Verificar si ya existe una persona con este DNI
-        existing_person_id = await conn.fetchval(
-            "SELECT id FROM persons WHERE dni = $1", dni
-        )
+        cuit = data.get("cuit")
+        razon_social = data.get("razon_social") or data.get("razonSocial")
+        
+        # Verificar si DNI fue enviado explícitamente (incluso si está vacío)
+        dni_was_sent = "dni" in data
+        cuit_was_sent = "cuit" in data
+        razon_social_was_sent = "razon_social" in data or "razonSocial" in data
+        
+        if not dni_was_sent and not cuit_was_sent:
+            return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
+        
+        # Validar DNI/CUIT y razon_social
+        error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
+        if error_msg:
+            return jsonify({"error": error_msg}), status_code
+        
+        # Limpiar DNI y CUIT (solo dígitos)
+        # Si DNI fue enviado pero está vacío, dni_clean será None (para actualizar a NULL)
+        # Si DNI no fue enviado, dni_clean será None pero no lo actualizaremos
+        dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+        cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
+        
+        # Buscar persona existente por DNI o CUIT
+        existing_person_id = None
+        if dni_clean:
+            existing_person_id = await conn.fetchval(
+                "SELECT id FROM persons WHERE dni = $1", dni_clean
+            )
+        if not existing_person_id and cuit_clean:
+            existing_person_id = await conn.fetchval(
+                "SELECT id FROM persons WHERE cuit = $1", cuit_clean
+            )
         
         if existing_person_id:
+            # Obtener valores actuales si no fueron enviados para mantenerlos
+            current_person = await conn.fetchrow(
+                "SELECT dni, cuit, razon_social FROM persons WHERE id = $1", existing_person_id
+            )
+            
+            # Determinar valores finales: si fue enviado, usar el nuevo (puede ser NULL); si no, mantener el actual
+            final_dni = dni_clean if dni_was_sent else current_person["dni"]
+            final_cuit = cuit_clean if cuit_was_sent else current_person["cuit"]
+            final_razon_social = razon_social if razon_social_was_sent else current_person["razon_social"]
+            
             # Usar la persona existente y actualizar sus datos
             await conn.execute("""
                 UPDATE persons
                 SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, is_owner = FALSE
-                WHERE id = $8
+                    city = $6, province = $7, is_owner = FALSE, dni = $8, 
+                    cuit = $9, razon_social = $10
+                WHERE id = $11
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), existing_person_id)
+                data.get("address"), data.get("city"), data.get("province"), 
+                final_dni, final_cuit, final_razon_social, existing_person_id)
             
             # Asignar la persona existente como conductor
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", existing_person_id, app_id)
@@ -119,11 +224,12 @@ async def add_or_update_driver(app_id):
         else:
             # Crear nueva persona solo si no existe
             driver_id = await conn.fetchval("""
-                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, is_owner)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, is_owner)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), dni)
+                data.get("address"), data.get("city"), data.get("province"), 
+                dni_clean, cuit_clean, razon_social)
 
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", driver_id, app_id)
             return jsonify({"message": "Conductor guardado", "person_id": driver_id}), 200
@@ -563,9 +669,13 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
+                o.cuit        AS owner_cuit,
+                o.razon_social AS owner_razon_social,
                 d.first_name  AS driver_first_name,
                 d.last_name   AS driver_last_name,
                 d.dni         AS driver_dni,
+                d.cuit        AS driver_cuit,
+                d.razon_social AS driver_razon_social,
                 c.license_plate,
                 c.brand,
                 c.model,
@@ -601,15 +711,18 @@ async def list_full_applications_by_workshop(workshop_id: int):
                     "first_name": r["owner_first_name"],
                     "last_name":  r["owner_last_name"],
                     "dni":        r["owner_dni"],
+                    "cuit":       r["owner_cuit"],
+                    "razon_social": r["owner_razon_social"],
                 }
-                if (r["owner_first_name"] or r["owner_last_name"] or r["owner_dni"] is not None)
-                else None
+                
             ),
             "driver": (
                 {
                     "first_name": r["driver_first_name"],
                     "last_name":  r["driver_last_name"],
                     "dni":        r["driver_dni"],
+                    "cuit":       r["driver_cuit"],
+                    "razon_social": r["driver_razon_social"],
                 }
                 if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
                 else None
@@ -639,7 +752,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             "status": status,
             "status_in": status_list
         }
-    }), 200
+    }), 200 
 
 
 

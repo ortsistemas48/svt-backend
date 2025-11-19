@@ -1741,7 +1741,6 @@ async def set_member_role(workshop_id: int, member_user_id):
 
 
 
-
 # ====== 5) Observaciones por paso ======
 
 # 5.1 Listar observaciones de un paso del taller
