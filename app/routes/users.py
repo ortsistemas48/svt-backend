@@ -81,7 +81,17 @@ async def get_user_by_email_lite():
 async def get_users_in_workshop(workshop_id: int):
     async with get_conn_ctx() as conn:
         users = await conn.fetch("""
-            SELECT u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number, u.title_name, u.license_number, ut.name AS role
+            SELECT 
+                u.id, 
+                u.first_name, 
+                u.last_name, 
+                u.email, 
+                u.dni, 
+                u.phone_number, 
+                u.title_name, 
+                u.license_number, 
+                ut.name AS role,
+                wu.engineer_kind
             FROM workshop_users wu
             JOIN users u ON wu.user_id = u.id
             JOIN user_types ut ON wu.user_type_id = ut.id
@@ -126,6 +136,37 @@ async def soft_delete_user(user_id: str):
         return jsonify({"error": "Usuario no encontrado o ya eliminado"}), 404
 
     return jsonify({"ok": True, "user_id": user_id, "deleted": True}), 200
+
+
+@users_bp.route("/restore/<user_id>", methods=["POST", "OPTIONS"])
+async def restore_user(user_id: str):
+    # Preflight CORS
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    # Validar UUID si aplica
+    try:
+        _as_uuid(user_id)
+        id_value = f"{user_id}"
+        cast = "::uuid"
+    except ValueError:
+        if not user_id.isdigit():
+            return jsonify({"error": "user_id inválido"}), 400
+        id_value = int(user_id)
+        cast = "::int"
+
+    async with get_conn_ctx() as conn:
+        result = await conn.execute(f"""
+            UPDATE users
+               SET deleted_at = NULL
+             WHERE id = $1{cast}
+               AND deleted_at IS NOT NULL
+        """, id_value)
+
+    if result.endswith("0"):
+        return jsonify({"error": "Usuario no encontrado o no está suspendido"}), 404
+
+    return jsonify({"ok": True, "user_id": user_id, "restored": True}), 200
 
 
 @users_bp.route("/get_users/all", methods=["GET"])
@@ -189,6 +230,73 @@ async def get_all_users():
                 "dni": r["dni"],
                 "phone_number": r["phone_number"],
                 "memberships": r["memberships"],  # lista de {workshop_id, role}
+            }
+            for r in rows
+        ],
+    })
+    
+    
+@users_bp.route("/get_users/suspended", methods=["GET"])
+async def get_suspended_users():
+    # ?limit=100&offset=0
+    try:
+        limit = int(request.args.get("limit", 100))
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        return jsonify({"error": "limit y offset deben ser números"}), 400
+
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    async with get_conn_ctx() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                u.id,
+                u.first_name,
+                u.last_name,
+                u.email,
+                u.dni,
+                u.phone_number,
+                u.deleted_at,
+                COALESCE(
+                  json_agg(
+                    DISTINCT jsonb_build_object(
+                      'workshop_id', wu.workshop_id,
+                      'role', ut.name
+                    )
+                  ) FILTER (WHERE wu.user_id IS NOT NULL),
+                  '[]'
+                ) AS memberships
+            FROM users u
+            LEFT JOIN workshop_users wu ON wu.user_id = u.id
+            LEFT JOIN user_types ut ON ut.id = wu.user_type_id
+            WHERE u.deleted_at IS NOT NULL
+            GROUP BY u.id, u.first_name, u.last_name, u.email, u.dni, u.phone_number, u.deleted_at
+            ORDER BY u.id
+            LIMIT $1 OFFSET $2;
+            """,
+            limit,
+            offset,
+        )
+
+        total_row = await conn.fetchrow("SELECT COUNT(*) AS total FROM users WHERE deleted_at IS NOT NULL;")
+        total = total_row["total"] if total_row else 0
+
+    return jsonify({
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "users": [
+            {
+                "id": r["id"],
+                "first_name": r["first_name"],
+                "last_name": r["last_name"],
+                "email": r["email"],
+                "dni": r["dni"],
+                "phone_number": r["phone_number"],
+                "deleted_at": r["deleted_at"],
+                "memberships": r["memberships"],
             }
             for r in rows
         ],

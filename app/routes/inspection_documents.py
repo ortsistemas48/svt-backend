@@ -68,7 +68,8 @@ async def list_inspection_documents(inspection_id: int):
         rows = await conn.fetch(f"""
             SELECT id, inspection_id, step_id, role,
                    type, file_name, bucket, object_path, file_url,
-                   size_bytes, mime_type, created_at
+                   size_bytes, mime_type, created_at,
+                   COALESCE(is_front, false) AS is_front
             FROM inspection_documents
             WHERE {where_sql}
             ORDER BY created_at DESC
@@ -114,6 +115,28 @@ async def upload_inspection_documents(inspection_id: int):
     client = _get_supabase_client()
     saved = []
 
+    # Soporte para marcar "frente del vehículo" (solo para type=vehicle_photo)
+    front_idx_raw = request.args.get("front_idx") or form_data.get("front_idx")
+    front_existing_raw = request.args.get("front_existing_id") or form_data.get("front_existing_id")
+    try:
+        front_idx = int(front_idx_raw) if front_idx_raw is not None and front_idx_raw != "" else None
+    except Exception:
+        front_idx = None
+    try:
+        front_existing_id = int(front_existing_raw) if front_existing_raw is not None and front_existing_raw != "" else None
+    except Exception:
+        front_existing_id = None
+
+    # Si corresponde, limpiar bandera is_front antes de subir (para asegurar unicidad)
+    if doc_type == "vehicle_photo" and (front_idx is not None or front_existing_id is not None):
+        async with get_conn_ctx() as conn:
+            await conn.execute("""
+                UPDATE inspection_documents
+                   SET is_front = false
+                 WHERE inspection_id = $1
+                   AND type = 'vehicle_photo'
+            """, inspection_id)
+
     for f in files:
         data = f.read()
         if not isinstance(data, (bytes, bytearray)):
@@ -145,16 +168,74 @@ async def upload_inspection_documents(inspection_id: int):
             row = await conn.fetchrow("""
                 INSERT INTO inspection_documents
                   (inspection_id, step_id, role, type, file_name, bucket, object_path, file_url,
-                   size_bytes, mime_type)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                   size_bytes, mime_type, is_front)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false)
                 RETURNING id, inspection_id, step_id, role, type,
                           file_name, bucket, object_path, file_url,
-                          size_bytes, mime_type, created_at
+                          size_bytes, mime_type, created_at, COALESCE(is_front,false) AS is_front
             """, inspection_id, step_id, role, doc_type, safe_name,
                  BUCKET_INSPECTION_DOCS, dest, file_url, len(data), f.mimetype)
             saved.append(dict(row))
 
+    # Marcar como frente el documento indicado
+    if doc_type == "vehicle_photo":
+        chosen_doc_id = None
+        if front_idx is not None and 0 <= front_idx < len(saved):
+            chosen_doc_id = saved[front_idx]["id"]
+        elif front_existing_id is not None:
+            chosen_doc_id = front_existing_id
+
+        if chosen_doc_id is not None:
+            async with get_conn_ctx() as conn:
+                await conn.execute("""
+                    UPDATE inspection_documents
+                       SET is_front = CASE WHEN id = $2 THEN true ELSE false END
+                     WHERE inspection_id = $1
+                       AND type = 'vehicle_photo'
+                """, inspection_id, chosen_doc_id)
+
     return jsonify(saved), 201
+
+
+@inspection_docs_bp.route("/inspections/<int:inspection_id>/documents/set-front", methods=["POST"])
+async def set_front_vehicle_photo(inspection_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    try:
+        data = await request.get_json()
+    except Exception:
+        data = None
+    doc_id = (data or {}).get("doc_id")
+    if not isinstance(doc_id, int):
+        return jsonify({"error": "doc_id inválido"}), 400
+
+    async with get_conn_ctx() as conn:
+        # validar pertenencia y tipo
+        doc = await conn.fetchrow("""
+            SELECT id, type FROM inspection_documents
+             WHERE id = $1 AND inspection_id = $2
+        """, doc_id, inspection_id)
+        if not doc:
+            return jsonify({"error": "Documento no encontrado"}), 404
+        if (doc["type"] or "").strip().lower() != "vehicle_photo":
+            return jsonify({"error": "El documento no es una foto de vehículo"}), 400
+
+        await conn.execute("""
+            UPDATE inspection_documents
+               SET is_front = false
+             WHERE inspection_id = $1
+               AND type = 'vehicle_photo'
+        """, inspection_id)
+
+        await conn.execute("""
+            UPDATE inspection_documents
+               SET is_front = true
+             WHERE id = $1 AND inspection_id = $2
+        """, doc_id, inspection_id)
+
+    return jsonify({"ok": True, "inspection_id": inspection_id, "doc_id": doc_id}), 200
 
 
 @inspection_docs_bp.route("/inspections/<int:inspection_id>/documents/<int:doc_id>", methods=["DELETE"])

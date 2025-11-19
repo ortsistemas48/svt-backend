@@ -1,6 +1,6 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
-from app.email import send_admin_ticket_created_email, send_admin_ticket_message_email
+from app.email import send_admin_ticket_created_email, send_admin_ticket_message_email, send_user_ticket_message_email
 import datetime
 import pytz
 import asyncio
@@ -454,6 +454,29 @@ async def admin_create_ticket_message(ticket_id: int):
             """,
             ticket_id, admin_id, content, now_arg
         )
+    # Notificar al dueño del ticket
+    try:
+        async with get_conn_ctx() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT t.workshop_id, t.created_by_user_id, u.email
+                FROM support_tickets t
+                JOIN users u ON u.id = t.created_by_user_id
+                WHERE t.id = $1
+                """,
+                ticket_id
+            )
+        if row and row["email"]:
+            asyncio.create_task(
+                send_user_ticket_message_email(
+                    to_email=row["email"],
+                    ticket_id=int(ticket_id),
+                    workshop_id=int(row["workshop_id"] or 0),
+                    message_preview=content,
+                )
+            )
+    except Exception as e:
+        log.exception("No se pudo notificar por email al creador del ticket %s: %s", ticket_id, e)
     return jsonify({"message": "Enviado", "id": msg_id}), 201
 
 @tickets_bp.route("/admin/<int:ticket_id>/status", methods=["PATCH", "PUT"])

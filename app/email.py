@@ -235,6 +235,29 @@ async def send_admin_ticket_message_email(
     )
     return await _send_email(to_email, subject, html)
 
+async def send_user_ticket_message_email(
+    to_email: str,
+    ticket_id: int,
+    workshop_id: int,
+    message_preview: str,
+):
+    subject = "Nuevo mensaje de soporte"
+    preview = (message_preview or "").strip()
+    if len(preview) > 160:
+        preview = preview[:157] + "..."
+    intro = (
+        f"Recibiste un nuevo mensaje de soporte en el ticket #{ticket_id} para tu taller {workshop_id}. "
+        f"Contenido: “{preview}”"
+    )
+    url = f"{FRONTEND_URL}/dashboard/{workshop_id}/help/{ticket_id}"
+    html = _wrap_html(
+        title="Nuevo mensaje de soporte",
+        intro=intro,
+        cta_text="Abrir conversación",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
 # ================================================
 # 4) Email de credenciales al crear la cuenta
 # ================================================
