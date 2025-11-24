@@ -3,7 +3,7 @@ from app.db import get_conn_ctx
 from asyncpg.exceptions import UniqueViolationError
 from uuid import UUID
 import json
-from app.email import send_workshop_pending_email, send_workshop_approved_email, send_admin_workshop_registered_email
+from app.email import send_workshop_pending_email, send_workshop_approved_email, send_workshop_suspended_email, send_admin_workshop_registered_email
 import logging
 import os
 import asyncio
@@ -851,6 +851,78 @@ async def approve_workshop(workshop_id: int):
     return jsonify({"ok": True, "workshop_id": workshop_id, "is_approved": True}), 200
 
 
+@workshops_bp.route("/<int:workshop_id>/suspend", methods=["POST"])
+async def suspend_workshop(workshop_id: int):
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    data = await request.get_json() or {}
+    reason = (data.get("reason") or "").strip()
+
+    async with get_conn_ctx() as conn:
+        # Validar que el usuario sea admin
+        is_admin = await _is_admin(conn, user_id)
+        if not is_admin:
+            return jsonify({"error": "Requiere admin"}), 403
+
+        async with conn.transaction():
+            # 1) Traer datos actuales
+            ws = await conn.fetchrow(
+                """
+                SELECT id, name, is_approved
+                FROM workshop
+                WHERE id = $1
+                """,
+                workshop_id
+            )
+            if not ws:
+                return jsonify({"error": "Workshop no encontrado"}), 404
+
+            # 2) Si ya estaba suspendido (is_approved = false), no reenviamos mails
+            if not ws["is_approved"]:
+                return jsonify({"ok": True, "workshop_id": ws["id"], "is_approved": False, "already": True}), 200
+
+            # 3) Suspender el taller
+            await conn.execute(
+                """
+                UPDATE workshop
+                SET is_approved = false, updated_at = NOW()
+                WHERE id = $1
+                """,
+                workshop_id
+            )
+
+            # 4) Obtener emails de los OWNERS
+            owners = await conn.fetch(
+                """
+                SELECT u.email
+                FROM workshop_users wu
+                JOIN users u ON u.id = wu.user_id
+                WHERE wu.workshop_id = $1 AND wu.user_type_id = $2 AND COALESCE(u.email, '') <> ''
+                """,
+                workshop_id, OWNER_ROLE_ID
+            )
+            owner_emails = [r["email"] for r in owners]
+
+            ws_name = ws["name"]
+
+    # 5) Enviar mails fuera de la transacción
+    if owner_emails:
+        for em in owner_emails:
+            try:
+                await send_workshop_suspended_email(
+                    to_email=em,
+                    workshop_name=ws_name,
+                    workshop_id=str(workshop_id),
+                    reason=reason if reason else None,
+                )
+            except Exception as e:
+                log.exception("No se pudo enviar email de taller suspendido a %s, error: %s", em, e)
+
+    return jsonify({"ok": True, "workshop_id": workshop_id, "is_approved": False}), 200
+
+
 @workshops_bp.route("/pending", methods=["GET"])
 async def list_pending_workshops():
     async with get_conn_ctx() as conn:
@@ -1054,7 +1126,6 @@ async def check_workshop_membership(workshop_id: int):
     async with get_conn_ctx() as conn:
         # 1) verificar que el taller exista y esté aprobado
         workshop = await conn.fetchrow("SELECT id, is_approved FROM workshop WHERE id = $1", workshop_id)
-        print(f"workshop={workshop}")
         if not workshop:
             return jsonify({"error": "Workshop no encontrado"}), 404
         
@@ -1182,8 +1253,6 @@ async def get_workshop(workshop_id: int):
         if not row:
             return jsonify({"error": "Workshop no encontrado"}), 404
         
-        print(_camel_ws_row(row))
-
     return jsonify(_camel_ws_row(row)), 200
 
 
@@ -1727,16 +1796,6 @@ async def set_member_role(workshop_id: int, member_user_id):
             )
 
     return jsonify({"ok": True, "workshop_id": workshop_id, "user_id": str(member_user_id), "user_type_id": int(role_id)}), 200
-
-
-
-
-
-
-
-
-
-
 
 
 

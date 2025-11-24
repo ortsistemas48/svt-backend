@@ -25,6 +25,10 @@ except Exception:
     pass
 
 from app.jobs import new_job, get_job, run_job
+from app.email import send_certificate_email
+import logging
+
+log = logging.getLogger(__name__)
 
 certificates_bp = Blueprint("certificates", __name__)
 
@@ -689,7 +693,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             o.street     AS owner_street,
             o.city       AS owner_city,
             o.province   AS owner_province,
-
+            o.email      AS owner_email,
             d.first_name AS driver_first_name,
             d.last_name  AS driver_last_name,
             d.dni        AS driver_dni,
@@ -830,7 +834,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             if not vto_dt_for_db:
                 vto_dt_for_db = _calc_vencimiento_fallback_dt(fecha_emision_dt, row["car_year"], argentina_tz)
         fecha_vencimiento = _fmt_date(vto_dt_for_db) if vto_dt_for_db else None
-
+    email_owner = row["owner_email"]
+    
     resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
     resultado_primera_inspeccion = (row["app_result"] or row["app_status"] or "").strip()
     resultado_mapeo_principal = resultado if not is_second_inspection else (resultado_primera_inspeccion or resultado)
@@ -1052,6 +1057,26 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             )
         except Exception as e:
             print(f"[CRT][RESUMEN] Error generando resumen final: {e}")
+
+    # Enviar certificado por email si el owner tiene email
+    if email_owner and email_owner.strip():
+        try:
+            await send_certificate_email(
+                to_email=email_owner.strip(),
+                pdf_bytes=pdf_bytes,
+                pdf_filename=file_name,
+                owner_name=owner_fullname,
+                car_plate=row["car_plate"],
+                fecha_emision=fecha_emision,
+                fecha_vencimiento=fecha_vencimiento,
+                resultado=resultado_final,
+                certificate_number=crt_numero,
+                workshop_name=row["workshop_name"],
+            )
+            log.info("Certificado enviado por email a %s para aplicación %s", email_owner, app_id)
+        except Exception as e:
+            # No fallar la generación del certificado si falla el envío del email
+            log.exception("Error enviando certificado por email a %s para aplicación %s: %s", email_owner, app_id, e)
 
     # devolver dict final para el job
     return {

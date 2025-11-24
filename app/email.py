@@ -1,6 +1,6 @@
 # app/email.py
-import os, secrets, httpx, logging
-from typing import Optional
+import os, secrets, httpx, logging, base64
+from typing import Optional, List, Dict
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_FROM = os.getenv("RESEND_FROM", "no-reply@example.com")
@@ -45,7 +45,7 @@ def _wrap_html(title: str, intro: str, cta_text: Optional[str] = None, cta_url: 
       </div>
     """
 
-async def _send_email(to_email: str, subject: str, html: str):
+async def _send_email(to_email: str, subject: str, html: str, attachments: Optional[List[Dict[str, str]]] = None):
     if not RESEND_API_KEY:
         log.error("RESEND_API_KEY no configurado, no se puede enviar email")
         raise RuntimeError("Falta RESEND_API_KEY")
@@ -59,7 +59,13 @@ async def _send_email(to_email: str, subject: str, html: str):
         "subject": subject,
         "html": html,
     }
-    log.info("Enviando email a %s con subject='%s' desde '%s'", to_email, subject, RESEND_FROM)
+    
+    if attachments:
+        payload["attachments"] = attachments
+    
+    log.info("Enviando email a %s con subject='%s' desde '%s'%s", 
+             to_email, subject, RESEND_FROM, 
+             f" con {len(attachments)} adjunto(s)" if attachments else "")
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -123,6 +129,24 @@ async def send_workshop_approved_email(to_email: str, workshop_name: str, worksh
         title="Taller aprobado",
         intro=intro,
         cta_text="Entrar al panel",
+        cta_url=url,
+    )
+    return await _send_email(to_email, subject, html)
+
+# ================================================
+# 3a) Taller suspendido
+# ================================================
+async def send_workshop_suspended_email(to_email: str, workshop_name: str, workshop_id: Optional[str] = None, reason: Optional[str] = None):
+    url = f"{FRONTEND_URL}/select-workshop"
+    subject = "Tu taller fue suspendido"
+    intro = f"El taller {workshop_name} fue suspendido."
+    if reason:
+        intro += f" Motivo: {reason}"
+    intro += " Para más información, contactá con soporte."
+    html = _wrap_html(
+        title="Taller suspendido",
+        intro=intro,
+        cta_text="Ver talleres",
         cta_url=url,
     )
     return await _send_email(to_email, subject, html)
@@ -358,3 +382,91 @@ async def send_password_reset_email(
     )
 
     return await _send_email(to_email, subject, html)
+
+# ================================================
+# 6) Envío de certificado de inspección
+# ================================================
+async def send_certificate_email(
+    to_email: str,
+    pdf_bytes: bytes,
+    pdf_filename: str,
+    owner_name: str,
+    car_plate: Optional[str] = None,
+    fecha_emision: Optional[str] = None,
+    fecha_vencimiento: Optional[str] = None,
+    resultado: Optional[str] = None,
+    certificate_number: Optional[str] = None,
+    workshop_name: Optional[str] = None,
+):
+    """
+    Envía el certificado PDF por email al owner.
+    
+    Args:
+        to_email: Email del destinatario
+        pdf_bytes: Bytes del PDF del certificado
+        pdf_filename: Nombre del archivo PDF (ej: "certificado.pdf")
+        owner_name: Nombre completo del titular
+        car_plate: Dominio del vehículo
+        fecha_emision: Fecha de emisión formateada
+        fecha_vencimiento: Fecha de vencimiento formateada (opcional)
+        resultado: Resultado de la inspección (Apto, Condicional, Rechazado)
+        certificate_number: Número de certificado
+        workshop_name: Nombre del taller
+    """
+    subject = "Tu certificado de inspección vehicular"
+    
+    # Construir detalles del certificado
+    detalles_html = """
+      <div style="text-align: left; display: inline-block; margin-top: 12px; background: #fff; border: 1px solid #eee; border-radius: 8px; padding: 16px 18px; width: 100%; max-width: 480px;">
+        <p style="margin: 0 0 12px; font-weight: 600; font-size: 15px; color: #0040B8;">Detalles del certificado</p>
+    """
+    
+    if owner_name:
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Titular:</strong> {owner_name}</p>'
+    
+    if car_plate:
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Dominio:</strong> {car_plate}</p>'
+    
+    if certificate_number:
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Número de certificado:</strong> {certificate_number}</p>'
+    
+    if fecha_emision:
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Fecha de emisión:</strong> {fecha_emision}</p>'
+    
+    if fecha_vencimiento:
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Fecha de vencimiento:</strong> {fecha_vencimiento}</p>'
+    
+    if resultado:
+        color_resultado = "#28a745" if resultado.lower() == "apto" else "#ffc107" if resultado.lower() == "condicional" else "#dc3545"
+        detalles_html += f'<p style="margin: 0 0 8px; font-size: 14px;"><strong>Resultado:</strong> <span style="color: {color_resultado}; font-weight: 600;">{resultado}</span></p>'
+    
+    if workshop_name:
+        detalles_html += f'<p style="margin: 0; font-size: 14px;"><strong>Taller:</strong> {workshop_name}</p>'
+    
+    detalles_html += """
+      </div>
+      <p style="color: #777; font-size: 13px; margin-top: 14px;">
+        El certificado se encuentra adjunto a este correo en formato PDF.
+      </p>
+    """
+    
+    intro = f"Hola {owner_name}," if owner_name else "Hola,"
+    intro += " tu certificado de inspección vehicular ha sido generado exitosamente."
+    
+    html = _wrap_html(
+        title="Certificado de inspección vehicular",
+        intro=intro,
+        extra_html=detalles_html,
+    )
+    
+    # Codificar el PDF en base64 para el adjunto
+    pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+    
+    attachments = [
+        {
+            "filename": pdf_filename,
+            "content": pdf_base64,
+        }
+    ]
+    
+    return await _send_email(to_email, subject, html, attachments=attachments)
