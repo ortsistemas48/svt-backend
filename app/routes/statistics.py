@@ -286,9 +286,6 @@ async def statistics_top_brands(workshop_id: int):
     except Exception as e:
         return jsonify({"error": f"Error interno, {e}"}), 500
 
-# ==============================
-# 7) Tipos de uso
-# ==============================
 @statistics_bp.route("/workshop/<int:workshop_id>/usage-types", methods=["GET"])
 async def statistics_usage_types(workshop_id: int):
     try:
