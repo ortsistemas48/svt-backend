@@ -182,7 +182,6 @@ async def admin_set_status(order_id: int):
 
     data = await request.get_json() or {}
     new_status = (data.get("status") or "").upper()
-    print(new_status)
     if new_status not in VALID_STATES:
         logger.warning("admin_set_status, estado invalido, %s", _log_ctx(user_id=user_id, order_id=order_id, new_status=new_status))
         return jsonify({"error": "Estado inválido"}), 400
@@ -207,13 +206,10 @@ async def admin_set_status(order_id: int):
                 if not order:
                     logger.warning("admin_set_status, orden no encontrada, %s", _log_ctx(user_id=user_id, order_id=order_id))
                     return jsonify({"error": "Orden no encontrada"}), 404
-                print(order)
 
                 prev_status = order["status"]
                 workshop_id = order["workshop_id"]
                 qty = int(order["quantity"] or 0)
-                print(qty)
-                print(order["quantity"])
 
                 logger.info(
                     "admin_set_status, empezando, %s",

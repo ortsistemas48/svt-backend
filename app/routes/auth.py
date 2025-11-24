@@ -308,7 +308,6 @@ async def verify_email():
             """,
             token
         )
-        print(row)
 
         def out(status: str, email: str | None = None):
             if mode == "json":

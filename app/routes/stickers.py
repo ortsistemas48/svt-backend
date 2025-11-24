@@ -79,7 +79,6 @@ async def list_available_orders():
         )
 
     out = [dict(r) for r in rows]
-    print(out)
     return jsonify(out), 200
 
 

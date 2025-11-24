@@ -255,8 +255,6 @@ async def add_or_update_car(app_id):
     if not green_card_no_expiration and data.get("green_card_expiration"):
         green_card_expiration = parser.parse(data["green_card_expiration"]).date()
 
-    print(f"green_card_expiration: {green_card_expiration}")
-    print(f"green_card_no_expiration: {green_card_no_expiration}")
 
     license_expiration = (
         parser.parse(data["license_expiration"]).date()
@@ -281,7 +279,6 @@ async def add_or_update_car(app_id):
                 """,
                 sticker_id, license_plate
             )
-            print(sticker_id, license_plate, app_ws_id)
             if not ok:
                 return jsonify({"error": "Oblea inválida o ya asignada"}), 400
 
@@ -1167,7 +1164,6 @@ async def get_daily_statistics(workshop_id: int):
         return jsonify(statistics), 200
 
     except Exception as e:
-        print(f"Error in get_daily_statistics: {str(e)}")
         return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
 
 

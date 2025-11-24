@@ -12,9 +12,7 @@ def create_app():
 
     @app.before_serving
     async def startup():
-        print(">> Startup iniciado")
         await init_db()
-        print(">> Startup completado")
 
     @app.before_request
     async def load_user():

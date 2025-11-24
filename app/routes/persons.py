@@ -32,7 +32,6 @@ async def get_persons_by_dni_or_cuit(identifier: str):
     
     async with get_conn_ctx() as conn:
         rows = await conn.fetch(query, identifier)
-    print(f"rows={rows}")
     if not rows:
         identifier_type = "DNI" if is_dni else "CUIT"
         return jsonify({"message": f"No se encontraron personas con ese {identifier_type}"}), 404

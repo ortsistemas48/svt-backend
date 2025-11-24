@@ -54,7 +54,6 @@ async def get_user_by_email_lite():
 
     if not email:
         return jsonify({"error": "email requerido"}), 400
-    print(email)
     async with get_conn_ctx() as conn:
         row = await conn.fetchrow(
             """
@@ -73,7 +72,6 @@ async def get_user_by_email_lite():
             """,
             email
         )
-    print(dict(row))
     return jsonify(dict(row) if row else None)
 
 
