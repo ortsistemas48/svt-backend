@@ -17,6 +17,7 @@ import json
 import unicodedata
 from calendar import monthrange
 import time
+from PIL import Image
 
 # Silenciar warnings / errores de MuPDF en stdout/stderr
 try:
@@ -57,21 +58,90 @@ def _get_supabase_client() -> Client:
         raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def _upload_pdf_and_get_public_url(data: bytes, path: str) -> str:
-    sb = _get_supabase_client()
-    sb.storage.from_(BUCKET_CERTS).upload(
-        file=data,
-        path=path,
-        file_options={"content-type": "application/pdf", "x-upsert": "true"},
-    )
-    res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
-    if isinstance(res, dict):
-        return res.get("publicUrl") or res.get("public_url") or ""
-    return str(res)
+def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3) -> str:
+    """
+    Sube un PDF a Supabase Storage con reintentos en caso de errores SSL/conexión.
+    
+    Args:
+        data: Bytes del PDF a subir
+        path: Ruta donde guardar el archivo
+        max_retries: Número máximo de reintentos (default: 3)
+    
+    Returns:
+        URL pública del archivo subido
+    
+    Raises:
+        RuntimeError: Si no se pudo subir después de todos los reintentos
+    """
+    file_size_mb = len(data) / (1024 * 1024)
+    print(f"[CRT] Intentando subir PDF de {file_size_mb:.2f} MB a {path}")
+    
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            # Crear nuevo cliente para cada intento (para evitar conexiones stale)
+            sb = _get_supabase_client()
+            
+            # Intentar subir el archivo
+            upload_result = sb.storage.from_(BUCKET_CERTS).upload(
+                file=data,
+                path=path,
+                file_options={"content-type": "application/pdf", "x-upsert": "true"},
+            )
+            
+            print(f"[CRT] PDF subido exitosamente en intento {attempt + 1}")
+            
+            # Obtener la URL pública
+            res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
+            if isinstance(res, dict):
+                url = res.get("publicUrl") or res.get("public_url") or ""
+            else:
+                url = str(res)
+            
+            if url:
+                print(f"[CRT] URL pública obtenida: {url}")
+                return url
+            else:
+                raise RuntimeError("No se pudo obtener la URL pública del archivo subido")
+            
+        except Exception as e:
+            last_error = e
+            error_msg = str(e).lower()
+            error_type = type(e).__name__
+            
+            # Detectar errores SSL/conexión que son recuperables
+            is_ssl_error = any(keyword in error_msg for keyword in [
+                "ssl", "eof", "protocol", "connection", "timeout", "broken pipe",
+                "_ssl.c", "ssl3", "tls", "socket", "errno", "closed", "reset"
+            ]) or "SSLError" in error_type or "ConnectionError" in error_type
+            
+            if is_ssl_error and attempt < max_retries - 1:
+                # Esperar antes de reintentar con backoff exponencial
+                wait_time = (2 ** attempt) + 0.5  # 1.5s, 2.5s, 4.5s
+                print(f"[CRT] Error SSL/conexión al subir PDF (intento {attempt + 1}/{max_retries}): {error_type}: {e}")
+                print(f"[CRT] Tamaño del archivo: {file_size_mb:.2f} MB")
+                print(f"[CRT] Reintentando en {wait_time:.2f} segundos...")
+                time.sleep(wait_time)
+                continue
+            else:
+                # Si no es un error recuperable o ya se agotaron los reintentos, relanzar
+                if attempt >= max_retries - 1:
+                    print(f"[CRT] Error después de {max_retries} intentos al subir PDF: {error_type}: {e}")
+                else:
+                    print(f"[CRT] Error no recuperable al subir PDF: {error_type}: {e}")
+                raise
+    
+    # Si llegamos aquí, todos los reintentos fallaron
+    raise RuntimeError(f"No se pudo subir el PDF después de {max_retries} intentos. Último error: {last_error}")
 
 async def _upload_pdf_and_get_public_url_async(data: bytes, path: str) -> str:
-    # Ejecuta la subida sin bloquear el event loop
-    return await asyncio.to_thread(_upload_pdf_and_get_public_url, data, path)
+    # Ejecuta la subida sin bloquear el event loop, con manejo de errores mejorado
+    try:
+        return await asyncio.to_thread(_upload_pdf_and_get_public_url, data, path)
+    except Exception as e:
+        error_msg = str(e)
+        raise RuntimeError(f"Error al subir PDF a Supabase Storage: {error_msg}")
 
 # ---------- utilidades comunes ----------
 def _make_qr_bytes(text: str, box_size: int = 8, border: int = 1) -> bytes:
@@ -83,6 +153,38 @@ def _make_qr_bytes(text: str, box_size: int = 8, border: int = 1) -> bytes:
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf.read()
+
+async def _download_and_resize_image_async(image_url: str, target_width: int, target_height: int) -> bytes | None:
+    """Descarga una imagen desde una URL y la redimensiona al tamaño especificado"""
+    def _download_and_resize() -> bytes | None:
+        try:
+            resp = requests.get(image_url, timeout=20)
+            resp.raise_for_status()
+            
+            # Abrir imagen con PIL
+            img = Image.open(io.BytesIO(resp.content))
+            
+            # Redimensionar manteniendo aspecto o forzando tamaño exacto
+            img_resized = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            
+            # Convertir a RGB si es necesario (para PNG con transparencia, etc.)
+            if img_resized.mode in ('RGBA', 'LA', 'P'):
+                rgb_img = Image.new('RGB', img_resized.size, (255, 255, 255))
+                if img_resized.mode == 'P':
+                    img_resized = img_resized.convert('RGBA')
+                rgb_img.paste(img_resized, mask=img_resized.split()[-1] if img_resized.mode == 'RGBA' else None)
+                img_resized = rgb_img
+            
+            # Guardar como bytes en formato PNG
+            buf = io.BytesIO()
+            img_resized.save(buf, format="PNG")
+            buf.seek(0)
+            return buf.read()
+        except Exception as e:
+            print(f"[CRT] Error descargando/redimensionando imagen desde {image_url}: {e}")
+            return None
+    
+    return await asyncio.to_thread(_download_and_resize)
 
 def _rect_almost_equal(r1: fitz.Rect, r2: fitz.Rect, tol: float = 0.1) -> bool:
     return (
@@ -185,7 +287,8 @@ def _to_upper(val) -> str:
         return ""
     return str(val).upper()
 
-def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None):
+def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None, photo_png: bytes | None = None):
+    print(f"[CRT] _replace_placeholders_transparente: photo_png disponible: {photo_png is not None}, mapping keys: {list(mapping.keys())}")
     total_counts = {k: 0 for k in mapping.keys()}
     SIZE_MULTIPLIER = {
         "${fecha_em}": 0.75,
@@ -199,10 +302,12 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
     MAX_SIZE = 28.0
 
     for page in doc:
-        ph_set = set(list(mapping.keys()) + ["${qr}"])
+        ph_set = set(list(mapping.keys()) + ["${qr}", "${photo}"])
         matches_map = _collect_all_placeholder_matches_with_style(page, ph_set)
         page_matches = {ph: matches_map.get(ph, []) for ph in mapping.keys() if matches_map.get(ph)}
         qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
+        # Buscar placeholder ${photo} siempre si está en el mapping, no solo si hay foto
+        photo_matches = matches_map.get("${photo}", []) if "${photo}" in mapping else []
 
         for ms in page_matches.values():
             for m in ms:
@@ -210,8 +315,11 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         if qr_png is not None and qr_matches:
             for m in qr_matches:
                 _add_transparent_redaction(page, m["rect"])
+        if photo_png is not None and photo_matches:
+            for m in photo_matches:
+                _add_transparent_redaction(page, m["rect"])
 
-        if page_matches or qr_matches:
+        if page_matches or qr_matches or photo_matches:
             page.apply_redactions(
                 images=PDF_REDACT_IMAGE_NONE,
                 graphics=PDF_REDACT_LINE_ART_NONE,
@@ -267,6 +375,42 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                 sq = _square_and_scale_rect(m["rect"], scale=1.5, page=page)
                 page.insert_image(sq, stream=qr_png, keep_proportion=True)
 
+        if photo_matches:
+            if photo_png is not None:
+                # Insertar la foto en el tamaño exacto: 220x84 puntos (en PDF, 1 punto = 1/72 pulgadas)
+                print(f"[CRT] Insertando foto en página {page.number}, {len(photo_matches)} placeholder(s) encontrado(s)")
+                for m in photo_matches:
+                    r_placeholder = m["rect"]
+                    print(f"[CRT] Placeholder encontrado en rectángulo: x0={r_placeholder.x0:.2f}, y0={r_placeholder.y0:.2f}, x1={r_placeholder.x1:.2f}, y1={r_placeholder.y1:.2f}, ancho={r_placeholder.width:.2f}, alto={r_placeholder.height:.2f}")
+                    
+                    # Crear un rectángulo con tamaño ajustado: un poco más ancho, muy poco más alto
+                    photo_width_pts = 145.0  # Un poquito más ancho horizontalmente
+                    photo_height_pts = 50.0  # Muy poquito más alto verticalmente
+                    
+                    # Calcular el centro del placeholder
+                    center_x = (r_placeholder.x0 + r_placeholder.x1) / 2
+                    center_y = (r_placeholder.y0 + r_placeholder.y1) / 2
+                    
+                    # Crear rectángulo con dimensiones exactas centrado
+                    r_exact = fitz.Rect(
+                        center_x - photo_width_pts / 2,
+                        center_y - photo_height_pts / 2,
+                        center_x + photo_width_pts / 2,
+                        center_y + photo_height_pts / 2
+                    )
+                    
+                    print(f"[CRT] Insertando foto en rectángulo exacto: x0={r_exact.x0:.2f}, y0={r_exact.y0:.2f}, x1={r_exact.x1:.2f}, y1={r_exact.y1:.2f}, ancho={r_exact.width:.2f}, alto={r_exact.height:.2f}")
+                    
+                    try:
+                        # Insertar imagen sin mantener proporción para que ocupe exactamente el tamaño del rectángulo
+                        page.insert_image(r_exact, stream=photo_png, keep_proportion=False)
+                        print(f"[CRT] Foto insertada exitosamente en página {page.number} con tamaño exacto {photo_width_pts}x{photo_height_pts} puntos")
+                    except Exception as e:
+                        print(f"[CRT] ERROR al insertar foto en página {page.number}: {e}")
+            else:
+                # Placeholder encontrado pero no hay foto, ya se redactó arriba, solo logueamos
+                print(f"[CRT] Placeholder ${photo} encontrado en página {page.number} pero photo_png es None (se eliminará del PDF)")
+
     return total_counts
 
 _TEMPLATE_CACHE: dict[str, tuple[float, bytes]] = {}
@@ -286,12 +430,12 @@ async def _get_template_bytes_async(template_url: str) -> bytes:
     _TEMPLATE_CACHE[template_url] = (now, data)
     return data
 
-def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str) -> tuple[bytes, dict]:
+def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None) -> tuple[bytes, dict]:
     # Ejecuta el render del PDF (CPU-bound) en hilo aparte
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     try:
         qr_png = _make_qr_bytes(qr_link)
-        counts = _replace_placeholders_transparente(doc, mapping, qr_png)
+        counts = _replace_placeholders_transparente(doc, mapping, qr_png, photo_png)
         out_buf = io.BytesIO()
         doc.save(out_buf, garbage=4, deflate=True)
         pdf_bytes = out_buf.getvalue()
@@ -302,8 +446,8 @@ def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str],
         except Exception:
             pass
 
-async def _render_certificate_pdf_async(template_bytes: bytes, mapping: dict[str, str], qr_link: str) -> tuple[bytes, dict]:
-    return await asyncio.to_thread(_render_certificate_pdf_sync, template_bytes, mapping, qr_link)
+async def _render_certificate_pdf_async(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None) -> tuple[bytes, dict]:
+    return await asyncio.to_thread(_render_certificate_pdf_sync, template_bytes, mapping, qr_link, photo_png)
 
 def _fmt_date(dt) -> str | None:
     if not dt:
@@ -664,13 +808,20 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_condicional.pdf",
         "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
     }
-    template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
-
-    try:
-        template_bytes = await _get_template_bytes_async(template_url)
-    except Exception as e:
-        raise RuntimeError(f"No se pudo descargar el template, {e}")
-
+    templates_por_cond_with_photo = {
+        "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_apto_photo.pdf",
+        "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_apto_photo.pdf",
+        "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
+    }
+    
+    # Determinar si necesitamos el template con foto (usage_type "D" para apto/condicional)
+    usage_type = None
+    needs_photo_template = False
+    photo_png = None
+    template_url = None  # Se establecerá después de obtener el row
+    insp = None  # Inicializar insp para evitar error de variable no definida
+    step_obs_rows = []
+    
     async with get_conn_ctx() as conn:
         row = await conn.fetchrow(
             """
@@ -728,7 +879,20 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         )
         if not row:
             raise RuntimeError("Trámite no encontrado")
+        
+        usage_type = (row.get("usage_type") or "").strip().upper()
+        needs_photo_template = (usage_type == "D" and condicion_raw in ("apto", "condicional"))
+        
+        if needs_photo_template:
+            template_url = templates_por_cond_with_photo.get(condicion_raw, templates_por_cond_with_photo["apto"])
+        else:
+            template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
+    
+        # Asegurar que template_url tenga un valor válido
+        if not template_url:
+            template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
+        # Obtener la inspección (siempre dentro del mismo contexto de conexión)
         insp = await conn.fetchrow(
             """
             SELECT
@@ -744,7 +908,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             app_id
         )
 
-        step_obs_rows = []
         if insp:
             step_obs_rows = await conn.fetch(
                 """
@@ -765,6 +928,39 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 insp["id"],
                 row["workshop_id"],
             )
+        
+        # Obtener la foto del vehículo si es necesario (usage_type "D")
+        if needs_photo_template and insp and insp.get("id"):
+            print(f"[CRT] Buscando foto de frente para inspection_id={insp['id']}")
+            photo_doc = await conn.fetchrow(
+                """
+                SELECT file_url
+                FROM inspection_documents
+                WHERE inspection_id = $1
+                  AND is_front = true
+                LIMIT 1
+                """,
+                insp["id"]
+            )
+            if photo_doc and photo_doc.get("file_url"):
+                photo_url = photo_doc["file_url"]
+                print(f"[CRT] Foto encontrada, URL: {photo_url}")
+                # Redimensionar a 145x50 píxeles (ajustado: más ancho, muy poco más alto)
+                photo_png = await _download_and_resize_image_async(photo_url, 145, 50)
+                if photo_png:
+                    print(f"[CRT] Foto descargada y redimensionada correctamente, tamaño: {len(photo_png)} bytes")
+                else:
+                    print(f"[CRT] ERROR: No se pudo descargar/redimensionar la foto desde {photo_url}")
+            else:
+                print(f"[CRT] ADVERTENCIA: No se encontró foto de frente para inspection_id={insp['id']}")
+        else:
+            if needs_photo_template:
+                print(f"[CRT] INFO: needs_photo_template=True pero insp={insp} o sin inspection_id")
+
+    try:
+        template_bytes = await _get_template_bytes_async(template_url)
+    except Exception as e:
+        raise RuntimeError(f"No se pudo descargar el template, {e}")
 
     is_second_inspection = bool(insp and insp.get("is_second"))
 
@@ -933,8 +1129,17 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${resultado_final}":       resultado_final,
     }
 
+    # Si necesitamos el template con foto, agregar el placeholder ${photo} al mapping
+    # Si no hay foto, el placeholder se eliminará del PDF (se redacta)
+    if needs_photo_template:
+        mapping["${photo}"] = ""  # El placeholder se reemplazará con la imagen si existe, o se eliminará
+        print(f"[CRT] Template con foto seleccionado. photo_png disponible: {photo_png is not None}")
+        if photo_png:
+            print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
+    
     try:
-        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link)
+        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png)
+        print(f"[CRT] PDF renderizado exitosamente. Placeholders reemplazados: {counts}")
     except Exception as e:
         raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
 

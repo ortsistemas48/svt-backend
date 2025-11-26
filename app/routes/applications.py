@@ -432,6 +432,7 @@ async def get_application(id):
                 a.result, 
                 a.consumed, 
                 a.result_2,
+                c.usage_type,
                 (SELECT created_at 
                  FROM inspections 
                  WHERE application_id = a.id AND COALESCE(is_second, FALSE) = FALSE
@@ -443,6 +444,7 @@ async def get_application(id):
                  ORDER BY created_at DESC NULLS LAST, id DESC
                  LIMIT 1) AS inspection_2_date
             FROM applications a
+            LEFT JOIN cars c ON c.id = a.car_id
             WHERE a.id = $1 
         """, id)
 
