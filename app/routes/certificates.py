@@ -814,7 +814,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     }
     templates_por_cond_with_photo = {
         "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_apto_photo.pdf",
-        "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_apto_photo.pdf",
+        "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_condicional_photo.pdf",
         "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
     }
     
