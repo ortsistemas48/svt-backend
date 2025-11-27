@@ -291,7 +291,7 @@ def _to_upper(val) -> str:
         return ""
     return str(val).upper()
 
-def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None, photo_png: bytes | None = None):
+def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None, photo_png: bytes | None = None, usage_type: str | None = None):
     print(f"[CRT] _replace_placeholders_transparente: photo_png disponible: {photo_png is not None}, mapping keys: {list(mapping.keys())}")
     total_counts = {k: 0 for k in mapping.keys()}
     SIZE_MULTIPLIER = {
@@ -302,6 +302,9 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${provincia2}": 0.50,
         "${observaciones}": 0.1,
     }
+    # Para tipo de uso D, reducir tamaño de fuente para observaciones2
+    if usage_type and (usage_type.strip().upper() == "D"):
+        SIZE_MULTIPLIER["${observaciones2}"] = 0.7
     MIN_SIZE = 4.0
     MAX_SIZE = 28.0
 
@@ -387,9 +390,9 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                     r_placeholder = m["rect"]
                     print(f"[CRT] Placeholder encontrado en rectángulo: x0={r_placeholder.x0:.2f}, y0={r_placeholder.y0:.2f}, x1={r_placeholder.x1:.2f}, y1={r_placeholder.y1:.2f}, ancho={r_placeholder.width:.2f}, alto={r_placeholder.height:.2f}")
                     
-                    # Crear un rectángulo con tamaño ajustado: un poco más ancho, muy poco más alto
-                    photo_width_pts = 145.0  # Un poquito más ancho horizontalmente
-                    photo_height_pts = 50.0  # Muy poquito más alto verticalmente
+                    # Crear un rectángulo con tamaño ajustado
+                    photo_width_pts = 246.0  # 351 * 0.70
+                    photo_height_pts = 170.0  # 243 * 0.70
                     
                     # Calcular el centro del placeholder
                     center_x = (r_placeholder.x0 + r_placeholder.x1) / 2
@@ -434,12 +437,12 @@ async def _get_template_bytes_async(template_url: str) -> bytes:
     _TEMPLATE_CACHE[template_url] = (now, data)
     return data
 
-def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None) -> tuple[bytes, dict]:
+def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None, usage_type: str | None = None) -> tuple[bytes, dict]:
     # Ejecuta el render del PDF (CPU-bound) en hilo aparte
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     try:
         qr_png = _make_qr_bytes(qr_link)
-        counts = _replace_placeholders_transparente(doc, mapping, qr_png, photo_png)
+        counts = _replace_placeholders_transparente(doc, mapping, qr_png, photo_png, usage_type)
         out_buf = io.BytesIO()
         doc.save(out_buf, garbage=4, deflate=True)
         pdf_bytes = out_buf.getvalue()
@@ -450,8 +453,8 @@ def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str],
         except Exception:
             pass
 
-async def _render_certificate_pdf_async(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None) -> tuple[bytes, dict]:
-    return await asyncio.to_thread(_render_certificate_pdf_sync, template_bytes, mapping, qr_link, photo_png)
+async def _render_certificate_pdf_async(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None, usage_type: str | None = None) -> tuple[bytes, dict]:
+    return await asyncio.to_thread(_render_certificate_pdf_sync, template_bytes, mapping, qr_link, photo_png, usage_type)
 
 def _fmt_date(dt) -> str | None:
     if not dt:
@@ -949,8 +952,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             if photo_doc and photo_doc.get("file_url"):
                 photo_url = photo_doc["file_url"]
                 print(f"[CRT] Foto encontrada, URL: {photo_url}")
-                # Redimensionar a 145x50 píxeles (ajustado: más ancho, muy poco más alto)
-                photo_png = await _download_and_resize_image_async(photo_url, 145, 50)
+                # Redimensionar a 246x170 píxeles (70% de 351x243)
+                photo_png = await _download_and_resize_image_async(photo_url, 246, 170)
                 if photo_png:
                     print(f"[CRT] Foto descargada y redimensionada correctamente, tamaño: {len(photo_png)} bytes")
                 else:
@@ -1074,7 +1077,9 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
     global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
-    global_obs_wrapped2 = textwrap.fill(global_obs_text, width=90, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
+    # Para tipo de uso D, reducir ancho a mitad de la hoja aprox (45 caracteres)
+    obs2_width = 45 if (usage_type and usage_type.strip().upper() == "D") else 90
+    global_obs_wrapped2 = textwrap.fill(global_obs_text, width=obs2_width, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
     observaciones_text = global_obs_wrapped
     observaciones_text2 = global_obs_wrapped2
 
@@ -1143,7 +1148,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
     
     try:
-        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png)
+        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png, usage_type)
         print(f"[CRT] PDF renderizado exitosamente. Placeholders reemplazados: {counts}")
     except Exception as e:
         raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
