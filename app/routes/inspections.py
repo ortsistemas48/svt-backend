@@ -168,7 +168,7 @@ async def create_inspection():
             row = await conn.fetchrow(
                 """
                 INSERT INTO inspections (application_id, user_id, is_second, created_at)
-                VALUES ($1, $2, TRUE, NOW())
+                VALUES ($1, $2, TRUE, NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')
                 RETURNING id
                 """,
                 app_id_int,
@@ -204,7 +204,7 @@ async def create_inspection():
         row = await conn.fetchrow(
             """
             INSERT INTO inspections (application_id, user_id, is_second, created_at)
-            VALUES ($1, $2, FALSE, NOW())
+            VALUES ($1, $2, FALSE, NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')
             RETURNING id
             """,
             app_id_int,
