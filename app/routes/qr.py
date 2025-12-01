@@ -47,20 +47,24 @@ async def get_qr_data(sticker_number: str):
               la.date    AS application_date,
               la.status  AS application_status,
               la.result  AS application_result,
-              li.expiration_date AS expiration_date
+              la.result_2 AS application_result_2,
+              li.expiration_date AS expiration_date,
+              li.is_second AS is_second_inspection
             FROM base b
             LEFT JOIN LATERAL (
-              SELECT a.id, a.date, a.status, a.result
+              SELECT a.id, a.date, a.status, a.result, a.result_2
               FROM applications a
               WHERE a.car_id = b.car_id
               ORDER BY a.date DESC NULLS LAST, a.id DESC
               LIMIT 1
             ) la ON TRUE
             LEFT JOIN LATERAL (
-              SELECT i.expiration_date
+              SELECT i.expiration_date, COALESCE(i.is_second, FALSE) AS is_second
               FROM inspections i
               WHERE i.application_id = la.id
-              ORDER BY i.id DESC
+              ORDER BY 
+                CASE WHEN COALESCE(i.is_second, FALSE) = TRUE THEN 0 ELSE 1 END,
+                i.id DESC
               LIMIT 1
             ) li ON TRUE
             """,
@@ -84,11 +88,17 @@ async def get_qr_data(sticker_number: str):
         exp = row["expiration_date"]
         if exp is not None and hasattr(exp, "isoformat"):
             exp = exp.isoformat()
+        
+        # Si estamos mostrando la segunda inspección, usar result_2; si no, usar result (primera inspección)
+        is_second = bool(row.get("is_second_inspection"))
+        print
+        inspection_result = row.get("application_result_2") if is_second else row.get("application_result")
+        
         inspection = {
             "application_id": row["application_id"],
             "inspection_date": row["application_date"],
             "status": row["application_status"],
-            "result": row["application_result"],
+            "result": inspection_result,
             "expiration_date": exp,
         }
 
