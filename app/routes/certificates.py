@@ -296,9 +296,9 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
     total_counts = {k: 0 for k in mapping.keys()}
     SIZE_MULTIPLIER = {
         "${fecha_em}": 0.75,
-        "${nombre_apellido2}": 0.50,
+        # "${nombre_apellido2}": 0.50,
         "${documento2}": 0.50,
-        "${localidad2}": 0.50,
+        # "${localidad2}": 0.50,
         "${provincia2}": 0.50,
         "${observaciones}": 0.1,
     }
@@ -1111,7 +1111,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) , TITULAR" or "",
+        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) - TITULAR" or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
