@@ -48,7 +48,9 @@ async def get_qr_data(sticker_number: str):
               la.status  AS application_status,
               la.result  AS application_result,
               la.result_2 AS application_result_2,
+              li.inspection_id,
               li.expiration_date AS expiration_date,
+              li.inspection_created_at,
               li.is_second AS is_second_inspection
             FROM base b
             LEFT JOIN LATERAL (
@@ -59,7 +61,7 @@ async def get_qr_data(sticker_number: str):
               LIMIT 1
             ) la ON TRUE
             LEFT JOIN LATERAL (
-              SELECT i.expiration_date, COALESCE(i.is_second, FALSE) AS is_second
+              SELECT i.id AS inspection_id, i.expiration_date, i.created_at AS inspection_created_at, COALESCE(i.is_second, FALSE) AS is_second
               FROM inspections i
               WHERE i.application_id = la.id
               ORDER BY 
@@ -89,17 +91,23 @@ async def get_qr_data(sticker_number: str):
         if exp is not None and hasattr(exp, "isoformat"):
             exp = exp.isoformat()
         
+        inspection_created_at = row.get("inspection_created_at")
+        if inspection_created_at is not None and hasattr(inspection_created_at, "isoformat"):
+            inspection_created_at = inspection_created_at.isoformat()
+        
         # Si estamos mostrando la segunda inspección, usar result_2; si no, usar result (primera inspección)
         is_second = bool(row.get("is_second_inspection"))
         print
         inspection_result = row.get("application_result_2") if is_second else row.get("application_result")
         
         inspection = {
+            "id": row.get("inspection_id"),
             "application_id": row["application_id"],
             "inspection_date": row["application_date"],
             "status": row["application_status"],
             "result": inspection_result,
             "expiration_date": exp,
+            "created_at": inspection_created_at,
         }
 
     return jsonify({
@@ -116,3 +124,44 @@ async def get_qr_data(sticker_number: str):
         },
         "inspection": inspection
     }), 200
+
+
+@qr_bp.route("/get-vehicle-photos/<int:inspection_id>", methods=["GET"])
+async def get_vehicle_photos(inspection_id: int):
+    """
+    Endpoint público para obtener las fotos del vehículo de una inspección.
+    Solo devuelve fotos si la inspección pertenece a un sticker válido.
+    """
+    async with get_conn_ctx() as conn:
+        # Verificar que la inspección existe y pertenece a un vehículo con sticker
+        row = await conn.fetchrow(
+            """
+            SELECT i.id
+            FROM inspections i
+            JOIN applications a ON a.id = i.application_id
+            JOIN cars c ON c.id = a.car_id
+            JOIN stickers s ON s.id = c.sticker_id
+            WHERE i.id = $1
+            """,
+            inspection_id
+        )
+        
+        if not row:
+            return jsonify({"error": "Inspección no encontrada o no válida"}), 404
+        
+        # Obtener las fotos del vehículo
+        photos = await conn.fetch(
+            """
+            SELECT id, inspection_id, step_id, role,
+                   type, file_name, bucket, object_path, file_url,
+                   size_bytes, mime_type, created_at,
+                   COALESCE(is_front, false) AS is_front
+            FROM inspection_documents
+            WHERE inspection_id = $1
+              AND type = 'vehicle_photo'
+            ORDER BY created_at DESC
+            """,
+            inspection_id
+        )
+        
+        return jsonify([dict(r) for r in photos]), 200
