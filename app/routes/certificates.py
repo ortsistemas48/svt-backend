@@ -1120,7 +1120,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${provincia}":             provincia or "",
         "${provincia2}":            provincia or "",
         "${dominio}":               row["car_plate"] or "",
-        "${anio}":                  str(row["car_year"] or ""),
+        "${anio}":                  str(row["car_registration_year"] or ""),
         "${marca}":                 row["car_brand"] or "",
         "${modelo}":                row["car_model"] or "",
         "${marca_motor}":           row["engine_brand"] or "",

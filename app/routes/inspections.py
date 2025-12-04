@@ -650,8 +650,8 @@ async def list_step_categories(inspection_id: int, step_id: int):
     """
     Primer nivel del modal.
 
-    Devuelve categorías que tengan al menos una observación activa
-    para este paso en este taller.
+    Devuelve categorías que estén definidas en DEFAULT_TREE para este paso,
+    incluso si no tienen observaciones activas.
 
     [
       { "category_id": 100, "name": "Luces traseras" },
@@ -659,6 +659,8 @@ async def list_step_categories(inspection_id: int, step_id: int):
       { "category_id": 102, "name": "Frenos" }
     ]
     """
+    from app.routes.workshops import DEFAULT_TREE, SUBCAT_NAME
+    
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
@@ -673,32 +675,47 @@ async def list_step_categories(inspection_id: int, step_id: int):
         if not belongs:
             return jsonify({"error": "El paso no corresponde al taller"}), 400
 
+        # Obtener el nombre del paso
+        step_row = await conn.fetchrow(
+            "SELECT name FROM steps WHERE id = $1",
+            step_id
+        )
+        if not step_row:
+            return jsonify({"error": "Paso no encontrado"}), 404
+        
+        step_name = step_row["name"]
+        
+        # Obtener las categorías definidas en DEFAULT_TREE para este paso
+        categories_for_step = DEFAULT_TREE.get(step_name, {})
+        category_names_for_step = list(categories_for_step.keys()) if categories_for_step else []
+        
+        if not category_names_for_step:
+            return jsonify([]), 200
+        
+        # Crear un diccionario para mantener el orden original
+        category_order = {name: idx for idx, name in enumerate(category_names_for_step)}
+        
+        # Obtener todas las categorías del workshop que están en el DEFAULT_TREE para este paso
         rows = await conn.fetch(
             """
-            SELECT DISTINCT
-              oc.id   AS category_id,
-              oc.name AS category_name
+            SELECT oc.id AS category_id, oc.name AS category_name
             FROM observation_categories oc
-            JOIN observation_subcategories osc
-              ON osc.category_id = oc.id
-            JOIN observations o
-              ON o.subcategory_id = osc.id
             WHERE oc.workshop_id = $1
-              AND o.workshop_id  = $1
-              AND o.step_id      = $2
-              AND o.is_active    = TRUE
-            ORDER BY oc.name
+              AND oc.name = ANY($2::text[])
             """,
-            ws_id,
-            step_id,
+            ws_id, category_names_for_step
         )
+        
+        # Ordenar según el orden del DEFAULT_TREE
+        rows_list = list(rows)
+        rows_list.sort(key=lambda r: category_order.get(r["category_name"], 999))
 
     out = [
         {
             "category_id": r["category_id"],
             "name": r["category_name"],
         }
-        for r in rows
+        for r in rows_list
     ]
     return jsonify(out), 200
 
@@ -763,6 +780,58 @@ async def list_category_observations(
             ORDER BY o.sort_order NULLS LAST, o.id
             """,
             category_id,
+            ws_id,
+            step_id,
+        )
+
+    out = [
+        {
+            "observation_id": r["observation_id"],
+            "description": r["observation_desc"],
+        }
+        for r in rows
+    ]
+
+    return jsonify(out), 200
+
+
+@inspections_bp.route(
+    "/inspections/<int:inspection_id>/steps/<int:step_id>/observations",
+    methods=["GET"],
+)
+async def list_step_observations(
+    inspection_id: int,
+    step_id: int
+):
+    """
+    Devuelve observaciones sin categoría (subcategory_id IS NULL)
+    para este paso en este taller.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        ws_id = await _get_workshop_for_inspection(conn, inspection_id)
+        if not ws_id:
+            return jsonify({"error": "Inspección no encontrada"}), 404
+
+        belongs = await _step_belongs_to_workshop(conn, step_id, ws_id)
+        if not belongs:
+            return jsonify({"error": "El paso no corresponde al taller"}), 400
+
+        rows = await conn.fetch(
+            """
+            SELECT
+              o.id          AS observation_id,
+              o.description AS observation_desc
+            FROM observations o
+            WHERE o.workshop_id = $1
+              AND o.step_id      = $2
+              AND o.subcategory_id IS NULL
+              AND o.is_active    = TRUE
+            ORDER BY o.id
+            """,
             ws_id,
             step_id,
         )

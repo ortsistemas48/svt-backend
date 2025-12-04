@@ -24,331 +24,443 @@ VALID_PROVINCES = {
     "Santa Fe","Santiago del Estero","Tierra del Fuego","Tucumán"
 }
 
- # árbol completo de pasos -> subcategorías -> observaciones hoja
 DEFAULT_TREE = {
     "Luces reglamentarias": {
-        "Luces no reglamentarias": [
-            "Adicional techo",
-            "Barra LED frontal",
-            "Faros auxiliares no permitidos",
-        ],
-        "Faltan luces de frenos": [
-            "Stop izquierdo",
-            "Stop derecho",
-            "Stop central",
-        ],
-        "Luces de giro fijas": [
-            "Giro delantero izquierdo fijo",
-            "Giro delantero derecho fijo",
-            "Giro trasero izquierdo fijo",
-            "Giro trasero derecho fijo",
-        ],
-        "Falta luz marcha atrás": [
-            "Marcha atrás izquierda",
-            "Marcha atrás derecha",
-        ],
-        "Retirar agregado de luces no reglamentarias": [
-            "Retirar faro auxiliar agregado",
-            "Retirar barra LED adicional",
-        ],
-        "Ajustar óptica": [
-            "Óptica delantera izquierda desalineada",
-            "Óptica delantera derecha desalineada",
-            "Óptica trasera desalineada",
-        ],
-        "Reparar / reemplazar óptica": [
-            "Mica rota",
-            "Soporte óptica suelto",
-            "Óptica quemada",
-        ],
+        "Luces no reglamentarias": [],
+        "Falta luz de freno": ["TD", "TI"],
+        "Luces de giro fijas": [],
+        "Falta luz marcha atrás": ["TD", "TI"],
+        "Retirar agregado de luces no reglamentarias": [],
+        "Ajustar óptica": ["DD", "DI", "TD", "TI"],
+        "Reparar o reemplazar óptica": ["DD", "DI", "TD", "TI"],
     },
+
     "Sistema de dirección": {
-        "Reemplazar extremo de dirección": [
-            "Extremo izquierdo con juego",
-            "Extremo derecho con juego",
-        ],
-        "Reemplazar precap": [
-            "Precap lado izquierdo",
-            "Precap lado derecho",
-        ],
-        "Reemplazar / ajustar fuelle de precap": [
-            "Fuelle izquierdo dañado",
-            "Fuelle derecho dañado",
-        ],
-        "Realizar alineado delantero": [
-            "Eje delantero desalineado",
-        ],
-        "Pérdida de líquido hidráulico": [
-            "Caja de dirección con pérdida",
-            "Manguera hidráulica con pérdida",
-        ],
+        "Reemplazar extremo de dirección": ["DD", "DI"],
+        "Reemplazar precap": ["DD", "DI"],
+        "Reemplazar o ajustar fuelle de precap": ["DD", "DI"],
+        "Realizar alineado delantero": [],
+        "Pérdida de líquido hidráulico": [],
+        "Reemplazar buje de caja de dirección": [],
     },
+
     "Frenos": {
-        "Ajustar frenos delanteros": [
-            "Delantero izquierdo",
-            "Delantero derecho",
-        ],
-        "Ajustar frenos traseros": [
-            "Trasero izquierdo",
-            "Trasero derecho",
-        ],
-        "Ajustar freno de mano": [
-            "Palanca freno de mano",
-            "Cables tensores flojos",
-        ],
-        "Diferencia de freno delantero": [
-            "Izquierdo frena más que derecho",
-            "Derecho frena más que izquierdo",
-        ],
-        "Diferencia de freno trasero": [
-            "Izquierdo frena más que derecho",
-            "Derecho frena más que izquierdo",
-        ],
-        "Diferencia de freno de mano": [
-            "Lado izquierdo bajo",
-            "Lado derecho bajo",
-        ],
-        "Pérdida de líquido de freno en zona": [
-            "Bomba de freno con pérdida",
-            "Cilindro de rueda con pérdida",
-            "Flexible de freno fisurado",
-        ],
-        "Reemplazar cañerías de freno": [
-            "Cañería corroída",
-            "Flexible cuarteado",
-        ],
-        "Rectificar discos de freno": [
-            "Disco delantero izquierdo",
-            "Disco delantero derecho",
-        ],
+        "Ajustar frenos delanteros": [],
+        "Ajustar frenos traseros": [],
+        "Ajustar freno de mano": [],
+        "Diferencia de freno delantero": [],
+        "Diferencia de freno trasero": [],
+        "Diferencia de freno de mano": [],
+        "Pérdida de líquido de freno en zona": ["DD", "DI", "TD", "TI"],
+        "Reemplazar todas las cañerías de freno": [],
+        "Reemplazar cañerías de freno traseras": [],
+        "Rectificar discos de freno": ["DD", "DI"],
     },
+
     "Sistema de suspensión": {
-        "Reemplazar amortiguador": [
-            "Amortiguador delantero izquierdo con pérdida",
-            "Amortiguador delantero derecho con pérdida",
-            "Amortiguador trasero con fuga",
-        ],
-        "Reemplazar cazoletas": [
-            "Cazoleta superior izquierda",
-            "Cazoleta superior derecha",
-        ],
-        "Reemplazar espiral": [
-            "Espiral delantero fatigado",
-            "Espiral trasero fatigado",
-        ],
-        "Reemplazar elástico": [
-            "Elástico trasero izquierdo",
-            "Elástico trasero derecho",
-        ],
-        "Ajustar anclajes de amortiguadores": [
-            "Tornillería floja delantera",
-            "Tornillería floja trasera",
-        ],
-        "Reemplazar bujes de parrilla": [
-            "Parrilla inferior izquierda con juego",
-            "Parrilla inferior derecha con juego",
-        ],
-        "Reemplazar rótula": [
-            "Rótula inferior izquierda",
-            "Rótula inferior derecha",
-        ],
-        "Reemplazar bujes de puente trasero": [
-            "Buje lado izquierdo desgastado",
-            "Buje lado derecho desgastado",
-        ],
-        "Reemplazar bujes de barra de torsión": [
-            "Buje barra estabilizadora izq.",
-            "Buje barra estabilizadora der.",
-        ],
-        "Reemplazar bieleta": [
-            "Bieleta izquierda con juego",
-            "Bieleta derecha con juego",
-        ],
+        "Reemplazar amortiguador": ["DD", "DI", "TD", "TI"],
+        "Reemplazar cazoleta": ["DD", "DI"],
+        "Reemplazar espiral": ["DD", "DI", "TD", "TI"],
+        "Reemplazar elástico": [],
+        "Ajustar anclaje de amortiguador": [],
+        "Reemplazar bujes de parrilla": ["DD", "DI"],
+        "Reemplazar rótula": ["DD", "DI"],
+        "Reemplazar rótula superior": ["DD", "DI"],
+        "Reemplazar bujes de puente trasero": ["TD", "TI"],
+        "Reemplazar bujes de barra de torsión": [],
+        "Reemplazar bieleta": ["DD", "DI", "TD", "TI"],
     },
+
     "Bastidor y chasis": {
-        "Reparar zócalo": [
-            "Zócalo lateral izquierdo dañado",
-            "Zócalo lateral derecho dañado",
-        ],
-        "Reparar guardabarro": [
-            "Guardabarro delantero golpeado",
-            "Guardabarro trasero golpeado",
-        ],
-        "Retirar gancho de remolque": [
-            "Gancho delantero no reglamentario",
-            "Gancho trasero no reglamentario",
-        ],
+        "Reparar zócalo": ["LD", "LI"],
+        "Reparar guardabarro": ["DD", "DI", "TD", "TI"],
+        "Retirar gancho de remolque": [],
     },
+
     "Llantas": {
-        "Reemplazar llanta": [
-            "Llanta delantera izquierda ovalada",
-            "Llanta delantera derecha golpeada",
-            "Llanta trasera deformada",
-        ],
-        "Falta bulón en rueda": [
-            "Rueda delantera izquierda",
-            "Rueda delantera derecha",
-            "Rueda trasera sin bulón",
-        ],
-        "Reemplazar rótula": [
-            "Rótula rueda del. izquierda con juego",
-            "Rótula rueda del. derecha con juego",
-        ],
-        "Reemplazar / ajustar rodamiento": [
-            "Rodamiento delantero izq. con ruido",
-            "Rodamiento delantero der. con juego",
-            "Rodamiento trasero con juego",
-        ],
+        "Reemplazar llanta": ["DD", "DI", "TD", "TI"],
+        "Falta bulón en rueda": ["DD", "DI", "TD", "TI"],
+        "Reemplazar o ajustar rodamiento": ["DD", "DI", "TD", "TI"],
     },
+
     "Neumáticos": {
-        "Reemplazar cubierta": [
-            "Cubierta delantera izquierda lisa",
-            "Cubierta delantera derecha lisa",
-            "Cubierta trasera desgastada",
-        ],
-        "Neumático no reglamentario": [
-            "Medida no permitida",
-            "Desgaste excesivo banda",
-        ],
+        "Reemplazar cubierta": ["DD", "DI", "TD", "TI"],
+        "Neumático no reglamentario": ["DD", "DI", "TD", "TI"],
     },
+
     "Carrocería": {
-        "Reemplazar parabrisas": [
-            "Parabrisas astillado",
-            "Parabrisas rajado en zona de visión",
-        ],
-        "Ajustar correctamente espejo retrovisor": [
-            "Espejo interior suelto",
-            "Espejo exterior flojo",
-        ],
-        "Reemplazar espejo retrovisor": [
-            "Espejo izquierdo faltante",
-            "Espejo derecho dañado",
-        ],
-        "Falta bocina": [
-            "Bocina inoperativa",
-            "Cableado bocina dañado",
-        ],
-        "Ajustar capot": [
-            "Cierre de capot desajustado",
-            "Bisagra capot floja",
-        ],
-        "Ajustar paragolpe delantero": [
-            "Paragolpe delantero suelto lado izq.",
-            "Paragolpe delantero suelto lado der.",
-        ],
-        "Ajustar paragolpe trasero": [
-            "Paragolpe trasero suelto lado izq.",
-            "Paragolpe trasero suelto lado der.",
-        ],
-        "Reparar apertura de puerta": [
-            "Puerta conductor no abre/cierra bien",
-            "Puerta acompañante no abre/cierra bien",
-            "Puerta trasera con traba",
-        ],
-        "Reparar apertura de ventanilla": [
-            "Levantavidrios conductor falla",
-            "Levantavidrios acompañante falla",
-        ],
-        "Sujetar correctamente portaequipaje de techo": [
-            "Portaequipaje flojo",
-            "Abrazaderas sin fijación",
-        ],
-        "Retirar butacas": [
-            "Butaca adicional trasera",
-            "Butaca no original",
-        ],
-        "Faltan apoyacabezas": [
-            "Apoyacabezas delantero faltante",
-            "Apoyacabezas trasero faltante",
-        ],
-        "Falta cinturón de seguridad": [
-            "Cinturón conductor faltante",
-            "Cinturón acompañante faltante",
-            "Cinturón trasero faltante",
-        ],
-        "Ajustar butaca": [
-            "Guías de butaca flojas",
-            "Anclaje de butaca flojo",
-        ],
+        "Reemplazar parabrisas": [],
+        "Ajustar correctamente espejo retrovisor": ["LD", "LI"],
+        "Reemplazar espejo retrovisor": ["LD", "LI"],
+        "Falta bocina": [],
+        "Ajustar capot": [],
+        "Ajustar paragolpe delantero": [],
+        "Ajustar paragolpe trasero": [],
+        "Reparar apertura de puerta": ["DD", "DI", "TD", "TI"],
+        "Reparar apertura de ventanilla": ["DD", "DI", "TD", "TI"],
+        "Sujetar correctamente portaequipaje de techo": [],
+        "Retirar butaca no reglamentaria": [],
+        "Faltan apoyacabezas": [],
+        "Falta cinturón de seguridad": [],
+        "Ajustar butaca": [],
     },
+
     "Accesorios reglamentarios": {
-        "Faltan elementos de seguridad": [
-            "Balizas faltantes",
-            "Botiquín incompleto",
-        ],
-        "Falta matafuego": [
-            "Sin matafuego a bordo",
-        ],
-        "Matafuego vencido": [
-            "Sin carga",
-            "Manómetro en rojo",
-        ],
-        "Pedir duplicado de patentes": [
-            "Patente delantera ilegible",
-            "Patente trasera ilegible",
-        ],
+        "Faltan elementos de seguridad": [],
+        "Falta matafuego": [],
+        "Matafuego vencido": [],
+        "Pedir duplicado de patentes": [],
     },
+
     "Gases": {
-        "Exceso de gases": [
-            "CO/HC fuera de rango",
-        ],
-        "Exceso de opacidad de gases": [
-            "Humo negro excesivo",
-            "Humo azul excesivo",
-        ],
+        "Exceso de gases": [],
+        "Exceso de opacidad de gases": [],
     },
+
     "Ruidos": {
-        "Reparar escape pinchado en zona": [
-            "Tramo intermedio pinchado",
-            "Tramo trasero pinchado",
-        ],
-        "Reparar / reemplazar precámara de escape": [
-            "Precámara fisurada",
-        ],
-        "Reparar / reemplazar silenciador de escape": [
-            "Silenciador trasero roto",
-        ],
-        "Reparar / reemplazar flexible de escape": [
-            "Flexible fisurado",
-        ],
-        "Colocar sujeción de escape en zona": [
-            "Abrazadera de escape floja",
-            "Soporte escape cortado",
-        ],
-        "Exceso de ruidos": [
-            "Escape libre / ruidoso",
-        ],
-        "Colocar silenciador de escape": [
-            "Falta silenciador final",
-        ],
+        "Reparar escape pinchado": [],
+        "Reparar o reemplazar precámara de escape": [],
+        "Reparar o reemplazar silenciador de escape": [],
+        "Reparar o reemplazar flexible de escape": [],
+        "Colocar sujeción de escape faltante": [],
+        "Exceso de ruidos": [],
+        "Colocar silenciador de escape": [],
     },
+
     "Otros elementos": {
-        "Reemplazar homocinética": [
-            "Homocinética lado izquierdo con juego",
-            "Homocinética lado derecho con juego",
-        ],
-        "Reemplazar fuelle de homocinética": [
-            "Fuelle lado izquierdo roto",
-            "Fuelle lado derecho roto",
-        ],
-        "Ajustar cardan": [
-            "Cruz cardan con juego",
-            "Soporte intermedio flojo",
-        ],
-        "Reemplazar taco de motor": [
-            "Taco delantero roto",
-            "Taco trasero roto",
-        ],
-        "Pérdida de aceite por motor": [
-            "Pérdida en cárter",
-            "Pérdida en tapa de válvulas",
-        ],
-        "Pérdida de líquido refrigerante": [
-            "Manguera de radiador con pérdida",
-            "Bomba de agua con pérdida",
-        ],
-    }
+        "Reemplazar homocinética": ["LCD", "LCI", "LRD", "LRI"],
+        "Reemplazar fuelle de homocinética": ["LCD", "LCI", "LRD", "LRI"],
+        "Ajustar cardan": [],
+        "Reemplazar taco de motor": [],
+        "Pérdida de aceite por motor": [],
+        "Pérdida de líquido refrigerante": [],
+    },
 }
+
+# DEFAULT_TREE = {
+#     "Luces reglamentarias": {
+#         "Luces no reglamentarias": [
+#             "Adicional techo",
+#             "Barra LED frontal",
+#             "Faros auxiliares no permitidos",
+#         ],
+#         "Faltan luces de frenos": [
+#             "Stop izquierdo",
+#             "Stop derecho",
+#             "Stop central",
+#         ],
+#         "Luces de giro fijas": [
+#             "Giro delantero izquierdo fijo",
+#             "Giro delantero derecho fijo",
+#             "Giro trasero izquierdo fijo",
+#             "Giro trasero derecho fijo",
+#         ],
+#         "Falta luz marcha atrás": [
+#             "Marcha atrás izquierda",
+#             "Marcha atrás derecha",
+#         ],
+#         "Retirar agregado de luces no reglamentarias": [
+#             "Retirar faro auxiliar agregado",
+#             "Retirar barra LED adicional",
+#         ],
+#         "Ajustar óptica": [
+#             "Óptica delantera izquierda desalineada",
+#             "Óptica delantera derecha desalineada",
+#             "Óptica trasera desalineada",
+#         ],
+#         "Reparar / reemplazar óptica": [
+#             "Mica rota",
+#             "Soporte óptica suelto",
+#             "Óptica quemada",
+#         ],
+#     },
+#     "Sistema de dirección": {
+#         "Reemplazar extremo de dirección": [
+#             "Extremo izquierdo con juego",
+#             "Extremo derecho con juego",
+#         ],
+#         "Reemplazar precap": [
+#             "Precap lado izquierdo",
+#             "Precap lado derecho",
+#         ],
+#         "Reemplazar / ajustar fuelle de precap": [
+#             "Fuelle izquierdo dañado",
+#             "Fuelle derecho dañado",
+#         ],
+#         "Realizar alineado delantero": [
+#             "Eje delantero desalineado",
+#         ],
+#         "Pérdida de líquido hidráulico": [
+#             "Caja de dirección con pérdida",
+#             "Manguera hidráulica con pérdida",
+#         ],
+#     },
+#     "Frenos": {
+#         "Ajustar frenos delanteros": [
+#             "Delantero izquierdo",
+#             "Delantero derecho",
+#         ],
+#         "Ajustar frenos traseros": [
+#             "Trasero izquierdo",
+#             "Trasero derecho",
+#         ],
+#         "Ajustar freno de mano": [
+#             "Palanca freno de mano",
+#             "Cables tensores flojos",
+#         ],
+#         "Diferencia de freno delantero": [
+#             "Izquierdo frena más que derecho",
+#             "Derecho frena más que izquierdo",
+#         ],
+#         "Diferencia de freno trasero": [
+#             "Izquierdo frena más que derecho",
+#             "Derecho frena más que izquierdo",
+#         ],
+#         "Diferencia de freno de mano": [
+#             "Lado izquierdo bajo",
+#             "Lado derecho bajo",
+#         ],
+#         "Pérdida de líquido de freno en zona": [
+#             "Bomba de freno con pérdida",
+#             "Cilindro de rueda con pérdida",
+#             "Flexible de freno fisurado",
+#         ],
+#         "Reemplazar cañerías de freno": [
+#             "Cañería corroída",
+#             "Flexible cuarteado",
+#         ],
+#         "Rectificar discos de freno": [
+#             "Disco delantero izquierdo",
+#             "Disco delantero derecho",
+#         ],
+#     },
+#     "Sistema de suspensión": {
+#         "Reemplazar amortiguador": [
+#             "Amortiguador delantero izquierdo con pérdida",
+#             "Amortiguador delantero derecho con pérdida",
+#             "Amortiguador trasero con fuga",
+#         ],
+#         "Reemplazar cazoletas": [
+#             "Cazoleta superior izquierda",
+#             "Cazoleta superior derecha",
+#         ],
+#         "Reemplazar espiral": [
+#             "Espiral delantero fatigado",
+#             "Espiral trasero fatigado",
+#         ],
+#         "Reemplazar elástico": [
+#             "Elástico trasero izquierdo",
+#             "Elástico trasero derecho",
+#         ],
+#         "Ajustar anclajes de amortiguadores": [
+#             "Tornillería floja delantera",
+#             "Tornillería floja trasera",
+#         ],
+#         "Reemplazar bujes de parrilla": [
+#             "Parrilla inferior izquierda con juego",
+#             "Parrilla inferior derecha con juego",
+#         ],
+#         "Reemplazar rótula": [
+#             "Rótula inferior izquierda",
+#             "Rótula inferior derecha",
+#         ],
+#         "Reemplazar bujes de puente trasero": [
+#             "Buje lado izquierdo desgastado",
+#             "Buje lado derecho desgastado",
+#         ],
+#         "Reemplazar bujes de barra de torsión": [
+#             "Buje barra estabilizadora izq.",
+#             "Buje barra estabilizadora der.",
+#         ],
+#         "Reemplazar bieleta": [
+#             "Bieleta izquierda con juego",
+#             "Bieleta derecha con juego",
+#         ],
+#     },
+#     "Bastidor y chasis": {
+#         "Reparar zócalo": [
+#             "Zócalo lateral izquierdo dañado",
+#             "Zócalo lateral derecho dañado",
+#         ],
+#         "Reparar guardabarro": [
+#             "Guardabarro delantero golpeado",
+#             "Guardabarro trasero golpeado",
+#         ],
+#         "Retirar gancho de remolque": [
+#             "Gancho delantero no reglamentario",
+#             "Gancho trasero no reglamentario",
+#         ],
+#     },
+#     "Llantas": {
+#         "Reemplazar llanta": [
+#             "Llanta delantera izquierda ovalada",
+#             "Llanta delantera derecha golpeada",
+#             "Llanta trasera deformada",
+#         ],
+#         "Falta bulón en rueda": [
+#             "Rueda delantera izquierda",
+#             "Rueda delantera derecha",
+#             "Rueda trasera sin bulón",
+#         ],
+#         "Reemplazar rótula": [
+#             "Rótula rueda del. izquierda con juego",
+#             "Rótula rueda del. derecha con juego",
+#         ],
+#         "Reemplazar / ajustar rodamiento": [
+#             "Rodamiento delantero izq. con ruido",
+#             "Rodamiento delantero der. con juego",
+#             "Rodamiento trasero con juego",
+#         ],
+#     },
+#     "Neumáticos": {
+#         "Reemplazar cubierta": [
+#             "Cubierta delantera izquierda lisa",
+#             "Cubierta delantera derecha lisa",
+#             "Cubierta trasera desgastada",
+#         ],
+#         "Neumático no reglamentario": [
+#             "Medida no permitida",
+#             "Desgaste excesivo banda",
+#         ],
+#     },
+#     "Carrocería": {
+#         "Reemplazar parabrisas": [
+#             "Parabrisas astillado",
+#             "Parabrisas rajado en zona de visión",
+#         ],
+#         "Ajustar correctamente espejo retrovisor": [
+#             "Espejo interior suelto",
+#             "Espejo exterior flojo",
+#         ],
+#         "Reemplazar espejo retrovisor": [
+#             "Espejo izquierdo faltante",
+#             "Espejo derecho dañado",
+#         ],
+#         "Falta bocina": [
+#             "Bocina inoperativa",
+#             "Cableado bocina dañado",
+#         ],
+#         "Ajustar capot": [
+#             "Cierre de capot desajustado",
+#             "Bisagra capot floja",
+#         ],
+#         "Ajustar paragolpe delantero": [
+#             "Paragolpe delantero suelto lado izq.",
+#             "Paragolpe delantero suelto lado der.",
+#         ],
+#         "Ajustar paragolpe trasero": [
+#             "Paragolpe trasero suelto lado izq.",
+#             "Paragolpe trasero suelto lado der.",
+#         ],
+#         "Reparar apertura de puerta": [
+#             "Puerta conductor no abre/cierra bien",
+#             "Puerta acompañante no abre/cierra bien",
+#             "Puerta trasera con traba",
+#         ],
+#         "Reparar apertura de ventanilla": [
+#             "Levantavidrios conductor falla",
+#             "Levantavidrios acompañante falla",
+#         ],
+#         "Sujetar correctamente portaequipaje de techo": [
+#             "Portaequipaje flojo",
+#             "Abrazaderas sin fijación",
+#         ],
+#         "Retirar butacas": [
+#             "Butaca adicional trasera",
+#             "Butaca no original",
+#         ],
+#         "Faltan apoyacabezas": [
+#             "Apoyacabezas delantero faltante",
+#             "Apoyacabezas trasero faltante",
+#         ],
+#         "Falta cinturón de seguridad": [
+#             "Cinturón conductor faltante",
+#             "Cinturón acompañante faltante",
+#             "Cinturón trasero faltante",
+#         ],
+#         "Ajustar butaca": [
+#             "Guías de butaca flojas",
+#             "Anclaje de butaca flojo",
+#         ],
+#     },
+#     "Accesorios reglamentarios": {
+#         "Faltan elementos de seguridad": [
+#             "Balizas faltantes",
+#             "Botiquín incompleto",
+#         ],
+#         "Falta matafuego": [
+#             "Sin matafuego a bordo",
+#         ],
+#         "Matafuego vencido": [
+#             "Sin carga",
+#             "Manómetro en rojo",
+#         ],
+#         "Pedir duplicado de patentes": [
+#             "Patente delantera ilegible",
+#             "Patente trasera ilegible",
+#         ],
+#     },
+#     "Gases": {
+#         "Exceso de gases": [
+#             "CO/HC fuera de rango",
+#         ],
+#         "Exceso de opacidad de gases": [
+#             "Humo negro excesivo",
+#             "Humo azul excesivo",
+#         ],
+#     },
+#     "Ruidos": {
+#         "Reparar escape pinchado en zona": [
+#             "Tramo intermedio pinchado",
+#             "Tramo trasero pinchado",
+#         ],
+#         "Reparar / reemplazar precámara de escape": [
+#             "Precámara fisurada",
+#         ],
+#         "Reparar / reemplazar silenciador de escape": [
+#             "Silenciador trasero roto",
+#         ],
+#         "Reparar / reemplazar flexible de escape": [
+#             "Flexible fisurado",
+#         ],
+#         "Colocar sujeción de escape en zona": [
+#             "Abrazadera de escape floja",
+#             "Soporte escape cortado",
+#         ],
+#         "Exceso de ruidos": [
+#             "Escape libre / ruidoso",
+#         ],
+#         "Colocar silenciador de escape": [
+#             "Falta silenciador final",
+#         ],
+#     },
+#     "Otros elementos": {
+#         "Reemplazar homocinética": [
+#             "Homocinética lado izquierdo con juego",
+#             "Homocinética lado derecho con juego",
+#         ],
+#         "Reemplazar fuelle de homocinética": [
+#             "Fuelle lado izquierdo roto",
+#             "Fuelle lado derecho roto",
+#         ],
+#         "Ajustar cardan": [
+#             "Cruz cardan con juego",
+#             "Soporte intermedio flojo",
+#         ],
+#         "Reemplazar taco de motor": [
+#             "Taco delantero roto",
+#             "Taco trasero roto",
+#         ],
+#         "Pérdida de aceite por motor": [
+#             "Pérdida en cárter",
+#             "Pérdida en tapa de válvulas",
+#         ],
+#         "Pérdida de líquido refrigerante": [
+#             "Manguera de radiador con pérdida",
+#             "Bomba de agua con pérdida",
+#         ],
+#     }
+# }
 
 SUBCAT_NAME = "General"
 
@@ -464,25 +576,26 @@ async def seed_workshop_observations(ws_id: int):
         if not pending:
             return
 
-        dedup = {}
-        for step_id, subcat_id, desc, sort_order in pending:
-            k = (step_id, desc)
-            if k in dedup:
-                continue
-            dedup[k] = (ws_id, step_id, subcat_id, desc, sort_order)
-
+        # Preparar arrays para el INSERT masivo
+        # No hacemos deduplicación aquí porque necesitamos que se creen todas las observaciones,
+        # incluso si tienen la misma descripción en diferentes categorías (diferentes subcat_id)
         ws_arr = []
         step_arr = []
         subcat_arr = []
         desc_arr = []
         sort_arr = []
-        for (_, _), (w, st, sc, d, so) in dedup.items():
-            ws_arr.append(w)
-            step_arr.append(st)
-            subcat_arr.append(sc)
-            desc_arr.append(d)
-            sort_arr.append(so)
+        for step_id, subcat_id, desc, sort_order in pending:
+            ws_arr.append(ws_id)
+            step_arr.append(step_id)
+            subcat_arr.append(subcat_id)
+            desc_arr.append(desc)
+            sort_arr.append(sort_order)
 
+        if not ws_arr:
+            return
+
+        # Insertar todas las observaciones, evitando duplicados por la combinación de
+        # workshop_id, step_id, subcategory_id y description
         await conn.execute(
             """
             WITH incoming(ws_id, step_id, subcat_id, description, sort_order) AS (
@@ -498,11 +611,13 @@ async def seed_workshop_observations(ws_id: int):
             )
             SELECT i.ws_id, i.step_id, i.subcat_id, i.description, TRUE, i.sort_order
             FROM incoming i
-            LEFT JOIN observations o
-              ON  o.workshop_id = i.ws_id
-              AND o.step_id     = i.step_id
-              AND o.description = i.description
-            WHERE o.id IS NULL
+            WHERE NOT EXISTS (
+              SELECT 1 FROM observations o
+              WHERE o.workshop_id = i.ws_id
+                AND o.step_id = i.step_id
+                AND o.subcategory_id = i.subcat_id
+                AND o.description = i.description
+            )
             """,
             ws_arr,
             step_arr,
@@ -1950,22 +2065,61 @@ async def list_step_categories(workshop_id: int, step_id: int):
         if not ok:
             return jsonify({"error": "El paso no corresponde al taller"}), 400
 
-        # Listar solo categorías (padres) que tienen observaciones (hijos) para ESTE paso
+        # Obtener el nombre del paso
+        step_row = await conn.fetchrow(
+            "SELECT name FROM steps WHERE id = $1",
+            step_id
+        )
+        if not step_row:
+            return jsonify({"error": "Paso no encontrado"}), 404
+        
+        step_name = step_row["name"]
+        
+        # Obtener las categorías definidas en DEFAULT_TREE para este paso
+        categories_for_step = DEFAULT_TREE.get(step_name, {})
+        category_names_for_step = list(categories_for_step.keys()) if categories_for_step else []
+        
+        if not category_names_for_step:
+            return jsonify([]), 200
+        
+        # Crear un diccionario para mantener el orden original
+        category_order = {name: idx for idx, name in enumerate(category_names_for_step)}
+        
+        # Obtener todas las categorías del workshop que están en el DEFAULT_TREE para este paso
+        # y asegurar que tengan la subcategoría "General"
         rows = await conn.fetch(
             """
-            SELECT DISTINCT oc.id AS category_id, oc.name AS category_name
+            SELECT oc.id AS category_id, oc.name AS category_name
             FROM observation_categories oc
-            JOIN observation_subcategories osc ON osc.category_id = oc.id
-            JOIN observations o              ON o.subcategory_id = osc.id
             WHERE oc.workshop_id = $1
-              AND o.workshop_id  = $1
-              AND o.step_id      = $2
-            ORDER BY oc.name ASC
+              AND oc.name = ANY($2::text[])
             """,
-            workshop_id, step_id
+            workshop_id, category_names_for_step
         )
+        
+        # Para cada categoría que no tenga subcategoría "General", crearla
+        for row in rows:
+            subcat_exists = await conn.fetchval(
+                """
+                SELECT 1 FROM observation_subcategories
+                WHERE category_id = $1 AND name = $2
+                """,
+                row["category_id"], SUBCAT_NAME
+            )
+            if not subcat_exists:
+                await conn.execute(
+                    """
+                    INSERT INTO observation_subcategories (category_id, name)
+                    VALUES ($1, $2)
+                    """,
+                    row["category_id"], SUBCAT_NAME
+                )
+        
+        # Ordenar según el orden del DEFAULT_TREE
+        rows_list = list(rows)
+        rows_list.sort(key=lambda r: category_order.get(r["category_name"], 999))
 
-    return jsonify([{"category_id": r["category_id"], "name": r["category_name"]} for r in rows]), 200
+    return jsonify([{"category_id": r["category_id"], "name": r["category_name"]} for r in rows_list]), 200
 
 
 @workshops_bp.route("/<int:workshop_id>/steps/<int:step_id>/categories", methods=["POST"])
@@ -2152,8 +2306,11 @@ async def list_category_observations(workshop_id: int, step_id: int, category_id
             SELECT o.id, o.description
             FROM observations o
             JOIN observation_subcategories osc ON osc.id = o.subcategory_id
-            WHERE o.workshop_id = $1 AND o.step_id = $2 AND osc.category_id = $3
-            ORDER BY o.id ASC
+            WHERE o.workshop_id = $1 
+              AND o.step_id = $2 
+              AND osc.category_id = $3
+              AND o.is_active = TRUE
+            ORDER BY o.sort_order NULLS LAST, o.id ASC
             """,
             workshop_id, step_id, category_id
         )
