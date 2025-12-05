@@ -596,7 +596,6 @@ async def _calc_vencimiento_from_rules(
     city_name: str | None,
     usage_code: str | None,
     registration_year: int | None,
-    registration_month: int | str | None,
     now_tz: pytz.BaseTzInfo,
 ) -> datetime | None:
     if not fecha_emision_dt:
@@ -639,15 +638,16 @@ async def _calc_vencimiento_from_rules(
         print(f"[CRT] Error consultando inspection_validity_rules: {e}")
         rule = None
 
-    reg_month = _parse_spanish_month(registration_month) or 1
+    # Usamos el mes actual de la fecha base para no perder meses en el cálculo
+    # Asumimos que el patentamiento fue en el mismo mes del año de registro
     try:
-        elapsed_months = (base.year - int(registration_year)) * 12 + (base.month - reg_month)
+        elapsed_months = (base.year - int(registration_year)) * 12
         elapsed_months = max(0, elapsed_months)
     except Exception:
-        print(f"[CRT] No se pudo calcular elapsed_months con registration_year={registration_year} registration_month={registration_month} (parseado={reg_month})")
+        print(f"[CRT] No se pudo calcular elapsed_months con registration_year={registration_year}")
         return None
     elapsed_years = elapsed_months // 12
-    print(f"[CRT] Antigüedad desde patentamiento: {elapsed_months} meses (~{elapsed_years} años). Mes patentamiento parseado={reg_month}")
+    print(f"[CRT] Antigüedad desde patentamiento: {elapsed_months} meses (~{elapsed_years} años). Asumiendo patentamiento en {base.month}/{registration_year}")
 
     default_up_to_36 = 36  
     default_from_3_to_7 = 24 
@@ -858,7 +858,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             c.model            AS car_model,
             c.manufacture_year AS car_year,
             c.registration_year AS car_registration_year,
-            c.registration_month AS car_registration_month,
             c.engine_brand     AS engine_brand,
             c.engine_number    AS engine_number,
             c.chassis_brand    AS chassis_brand,
@@ -1027,7 +1026,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 city_name=row["workshop_city"],
                 usage_code=row["usage_type"],
                 registration_year=row["car_registration_year"],
-                registration_month=row["car_registration_month"],
                 now_tz=argentina_tz,
             )
             if not vto_dt_for_db:
@@ -1196,8 +1194,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             city_dbg = row.get("workshop_city")
             usage_dbg = (row.get("usage_type") or "").strip().upper()
             reg_year_dbg = row.get("car_registration_year")
-            reg_mon_raw = row.get("car_registration_month")
-            reg_mon_dbg = _parse_spanish_month(reg_mon_raw) or 1
+            reg_mon_dbg = None
 
             prov_code_dbg, loc_key_dbg = _find_localidad_codes(prov_dbg, city_dbg)
 
@@ -1207,9 +1204,10 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             elapsed_years_dbg = None
             try:
                 if reg_year_dbg:
-                    elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12 + (base_dbg.month - reg_mon_dbg)
+                    elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12
                     elapsed_months_dbg = max(0, elapsed_months_dbg)
                     elapsed_years_dbg = elapsed_months_dbg // 12
+                    reg_mon_dbg = base_dbg.month
             except Exception:
                 pass
 
