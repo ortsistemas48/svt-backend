@@ -872,6 +872,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             ws.province      AS workshop_province,
             ws.city          AS workshop_city,
 
+            s.id AS sticker_id,
             s.sticker_number AS sticker_number
             FROM applications a
             LEFT JOIN persons   o  ON o.id  = a.owner_id
@@ -885,6 +886,13 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         )
         if not row:
             raise RuntimeError("Trámite no encontrado")
+        
+        # Actualizar estado de la oblea a 'No Disponible' si el resultado es Rechazado
+        if condicion == "Rechazado" and row.get("sticker_id"):
+            await conn.execute(
+                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                row["sticker_id"]
+            )
         
         usage_type = (row.get("usage_type") or "").strip().upper()
         needs_photo_template = (usage_type == "D" and condicion_raw in ("apto", "condicional"))
@@ -962,6 +970,17 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         else:
             if needs_photo_template:
                 print(f"[CRT] INFO: needs_photo_template=True pero insp={insp} o sin inspection_id")
+        
+        # Actualizar estado de la oblea a 'No Disponible' si el resultado es Rechazado
+        if condicion == "Rechazado" and row.get("sticker_id"):
+            try:
+                await conn.execute(
+                    "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                    row["sticker_id"]
+                )
+                print(f"[CRT] Oblea {row['sticker_id']} actualizada a 'No Disponible' (resultado: Rechazado)")
+            except Exception as e:
+                print(f"[CRT] ERROR: No se pudo actualizar el estado de la oblea {row.get('sticker_id')}: {e}")
 
     try:
         template_bytes = await _get_template_bytes_async(template_url)
