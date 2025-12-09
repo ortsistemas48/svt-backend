@@ -226,13 +226,24 @@ def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: s
     if missing_ph:
         for ph in missing_ph:
             try:
+                # Buscar el placeholder exacto
                 rects = page.search_for(ph)
                 for r in rects:
                     rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
                     if rect_key not in seen_rects:
                         seen_rects[rect_key] = True
                         result[ph].append({"rect": r, "font": "helv", "size": 11.0})
-            except Exception:
+                # Si no se encontró, intentar sin los caracteres especiales ${}
+                if not rects and ph.startswith("${") and ph.endswith("}"):
+                    ph_clean = ph[2:-1]  # Remover ${ y }
+                    rects_clean = page.search_for(ph_clean)
+                    for r in rects_clean:
+                        rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                        if rect_key not in seen_rects:
+                            seen_rects[rect_key] = True
+                            result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+            except Exception as e:
+                print(f"[CRT] Error buscando placeholder {ph}: {e}")
                 pass
 
     # Optimización: deduplicación más eficiente usando dict
@@ -325,6 +336,11 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         page_matches = {ph: matches_map.get(ph, []) for ph in mapping.keys() if matches_map.get(ph)}
         qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
         photo_matches = matches_map.get("${photo}", []) if has_photo_placeholder else []
+        
+        # Debug: verificar si numero_motor y numero_chasis están en el mapping pero no se encontraron
+        for ph_debug in ("${numero_motor}", "${numero_chasis}"):
+            if ph_debug in mapping and ph_debug not in page_matches:
+                print(f"[CRT] ADVERTENCIA: {ph_debug} está en mapping (valor='{mapping[ph_debug]}') pero no se encontró en la página {page.number}")
 
         # Optimización: acumular todas las redacciones antes de aplicar
         has_redactions = False
@@ -352,6 +368,10 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         for ph, ms in page_matches.items():
             raw_val = mapping.get(ph, "")
             val = _to_upper(raw_val)
+            
+            # Debug para numero_motor y numero_chasis
+            if ph in ("${numero_motor}", "${numero_chasis}"):
+                print(f"[CRT] Procesando {ph}: raw_val='{raw_val}', val='{val}', encontrados={len(ms)} matches")
 
             for m in ms:
                 fontname = m["font"] if m["font"] in (
@@ -1153,10 +1173,10 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${marca}":                 row["car_brand"] or "",
         "${modelo}":                row["car_model"] or "",
         "${marca_motor}":           row["engine_brand"] or "",
-        "${numero_motor}":          row["engine_number"] or "",
+        "${numero_motor}":          str(row["engine_number"] or ""),
         "${combustible}":           row["fuel_type"] or "",
         "${marca_chasis}":          row["chassis_brand"] or "",
-        "${numero_chasis}":         row["chassis_number"] or "",
+        "${numero_chasis}":         str(row["chassis_number"] or ""),
         "${tipo_vehiculo}":         tipo_puro,
         "${resultado_inspeccion}":  resultado_mapeo_principal,
         "${observaciones}":         observaciones_text,
@@ -1174,9 +1194,22 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         if photo_png:
             print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
     
+    # Debug: verificar valores de numero_motor y numero_chasis antes de renderizar
+    print(f"[CRT] Valores antes de renderizar: numero_motor='{mapping.get('${numero_motor}', 'NO_ENCONTRADO')}', numero_chasis='{mapping.get('${numero_chasis}', 'NO_ENCONTRADO')}'")
+    print(f"[CRT] Valores desde BD: engine_number={row.get('engine_number')}, chassis_number={row.get('chassis_number')}")
+    
     try:
         pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png, usage_type)
         print(f"[CRT] PDF renderizado exitosamente. Placeholders reemplazados: {counts}")
+        # Debug específico para numero_motor y numero_chasis
+        if "${numero_motor}" in counts:
+            print(f"[CRT] ${{numero_motor}} reemplazado {counts['${numero_motor}']} vez(ces)")
+        else:
+            print(f"[CRT] ADVERTENCIA: ${{numero_motor}} NO fue reemplazado (no encontrado en PDF)")
+        if "${numero_chasis}" in counts:
+            print(f"[CRT] ${{numero_chasis}} reemplazado {counts['${numero_chasis}']} vez(ces)")
+        else:
+            print(f"[CRT] ADVERTENCIA: ${{numero_chasis}} NO fue reemplazado (no encontrado en PDF)")
     except Exception as e:
         raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
 
