@@ -1185,6 +1185,17 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             app_id
         )
 
+        # Actualizar created_at de la inspección a la fecha actual (zona horaria Argentina)
+        if insp and insp.get("id"):
+            await conn.execute(
+                """
+                UPDATE inspections
+                SET created_at = NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires'
+                WHERE id = $1
+                """,
+                insp["id"],
+            )
+
         # Ejecutar consultas secuencialmente (asyncpg no permite paralelismo en la misma conexión)
         step_obs_rows = []
         photo_doc = None
