@@ -40,7 +40,17 @@ BUCKET_CERTS = os.getenv("SUPABASE_BUCKET_CERTS", "certificados")
 def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
     s = base_size
     n = len(value or "")
-    if ph in ("${domicilio}", "${modelo}"):
+    if ph == "${domicilio}":
+        # Para domicilio, hacer más agresivo cuando tiene más de 30 caracteres
+        if n <= 20: factor = 1.00
+        elif n <= 30: factor = 0.85
+        elif n <= 40: factor = 0.55  # Más pequeño que antes (era 0.75)
+        elif n <= 50: factor = 0.40  # Mucho más pequeño (era 0.65)
+        elif n <= 60: factor = 0.30  # Muy pequeño
+        else: factor = 0.28  # Extremadamente pequeño (era 0.55)
+        s *= factor
+    elif ph == "${modelo}":
+        # Para modelo, mantener la lógica original
         if n <= 20: factor = 1.00
         elif n <= 30: factor = 0.85
         elif n <= 40: factor = 0.75
@@ -196,11 +206,41 @@ def _rect_almost_equal(r1: fitz.Rect, r2: fitz.Rect, tol: float = 0.1) -> bool:
         abs(r1.y1 - r2.y1) < tol
     )
 
+def _rects_overlap_significantly(r1: fitz.Rect, r2: fitz.Rect, overlap_threshold: float = 0.8) -> bool:
+    """Verifica si dos rectángulos se superponen significativamente (más del 80% del área)"""
+    # Calcular intersección
+    x0 = max(r1.x0, r2.x0)
+    y0 = max(r1.y0, r2.y0)
+    x1 = min(r1.x1, r2.x1)
+    y1 = min(r1.y1, r2.y1)
+    
+    if x0 >= x1 or y0 >= y1:
+        return False  # No hay intersección
+    
+    # Área de intersección
+    intersection_area = (x1 - x0) * (y1 - y0)
+    
+    # Área del rectángulo más pequeño
+    area1 = (r1.x1 - r1.x0) * (r1.y1 - r1.y0)
+    area2 = (r2.x1 - r2.x0) * (r2.y1 - r2.y0)
+    min_area = min(area1, area2)
+    
+    if min_area == 0:
+        return False
+    
+    # Si la intersección es más del 80% del área más pequeña, son el mismo placeholder
+    return (intersection_area / min_area) >= overlap_threshold
+
 def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: set[str]):
     result = {ph: [] for ph in placeholders}
     # Optimización: usar un set para búsqueda rápida
     ph_set = set(placeholders)
-    seen_rects = {}  # Cache de rectángulos vistos para evitar duplicados
+    # Pre-calcular set de placeholders múltiples para búsqueda rápida
+    multi_occurrence_ph_set = {"${numero_motor}", "${numero_chasis}", "${fecha_emision}", 
+                               "${fecha_em2}", "${fecha_vto}", "${fecha_vencimiento}"}
+    # Para placeholders múltiples, usar un dict separado con mayor precisión
+    seen_rects_multi = {}  # Para placeholders que aparecen múltiples veces (4 decimales)
+    seen_rects_normal = {}  # Para otros placeholders (1 decimal)
     
     try:
         d = page.get_text("dict")
@@ -209,53 +249,214 @@ def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: s
                 for span in line.get("spans", []):
                     txt = span.get("text")
                     if txt in ph_set:
-                        x0, y0, x1, y1 = span["bbox"]
-                        rect_key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
-                        if rect_key not in seen_rects:
-                            seen_rects[rect_key] = True
-                            result[txt].append({
-                                "rect": fitz.Rect(x0, y0, x1, y1),
-                                "font": span.get("font") or "helv",
-                                "size": float(span.get("size") or 11),
-                            })
+                        # IMPORTANTE: Verificar que el texto es exactamente el placeholder, no una subcadena
+                        # Por ejemplo, si encontramos "${fecha_em2}" pero estamos buscando "${fecha_emision}",
+                        # no deberíamos agregarlo a ${fecha_emision}
+                        # Solo agregar si el texto coincide exactamente con algún placeholder en el set
+                        if txt in placeholders:  # Verificar que es exactamente uno de los placeholders buscados
+                            x0, y0, x1, y1 = span["bbox"]
+                            # Para placeholders que aparecen múltiples veces, usar más precisión (4 decimales)
+                            is_multi = txt in multi_occurrence_ph_set
+                            if is_multi:
+                                # Usar 4 decimales para evitar eliminar instancias legítimas
+                                rect_key = (round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4))
+                                if rect_key not in seen_rects_multi:
+                                    seen_rects_multi[rect_key] = True
+                                    result[txt].append({
+                                        "rect": fitz.Rect(x0, y0, x1, y1),
+                                        "font": span.get("font") or "helv",
+                                        "size": float(span.get("size") or 11),
+                                    })
+                            else:
+                                rect_key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
+                                if rect_key not in seen_rects_normal:
+                                    seen_rects_normal[rect_key] = True
+                                    result[txt].append({
+                                        "rect": fitz.Rect(x0, y0, x1, y1),
+                                        "font": span.get("font") or "helv",
+                                        "size": float(span.get("size") or 11),
+                                    })
     except Exception:
         pass
 
-    # Optimización: solo buscar placeholders que no se encontraron en get_text
+    # Optimización: para placeholders múltiples, SIEMPRE usar search_for() para encontrar todas las instancias
+    # incluso si get_text() ya encontró algunas
+    multi_occurrence_ph_set = {"${numero_motor}", "${numero_chasis}", "${fecha_emision}", 
+                               "${fecha_em2}", "${fecha_vto}", "${fecha_vencimiento}"}
     missing_ph = [ph for ph in placeholders if not result[ph]]
-    if missing_ph:
-        for ph in missing_ph:
+    # Agregar placeholders múltiples que ya se encontraron para buscar más instancias con search_for
+    ph_to_search = set(missing_ph) | {ph for ph in multi_occurrence_ph_set if ph in placeholders and result[ph]}
+    
+    # Ordenar placeholders por longitud (más largos primero) para evitar que placeholders cortos
+    # sean encontrados cuando se busca uno más largo (ej: ${fecha_em2} dentro de ${fecha_emision})
+    ph_to_search_sorted = sorted(ph_to_search, key=len, reverse=True)
+    
+    if ph_to_search_sorted:
+        for ph in ph_to_search_sorted:
             try:
-                # Buscar el placeholder exacto
+                # Determinar si es un placeholder que aparece múltiples veces (usar set para búsqueda rápida)
+                is_multi = ph in multi_occurrence_ph_set
+                
+                # Buscar el placeholder exacto con search_for (siempre para placeholders múltiples)
+                # IMPORTANTE: Filtrar resultados para que coincidan exactamente, no subcadenas
+                # Esto evita que ${fecha_em2} sea encontrado cuando se busca ${fecha_emision}
                 rects = page.search_for(ph)
-                for r in rects:
-                    rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
-                    if rect_key not in seen_rects:
-                        seen_rects[rect_key] = True
-                        result[ph].append({"rect": r, "font": "helv", "size": 11.0})
-                # Si no se encontró, intentar sin los caracteres especiales ${}
-                if not rects and ph.startswith("${") and ph.endswith("}"):
+                if rects:
+                    for r in rects:
+                        # Verificar que el texto en este rectángulo coincide EXACTAMENTE con el placeholder buscado
+                        # Esto es crítico para evitar que placeholders más cortos sean encontrados cuando se busca uno más largo
+                        # Por ejemplo, evitar que ${fecha_em2} sea encontrado cuando se busca ${fecha_emision}
+                        matches_exactly = False
+                        try:
+                            # Obtener el texto en este rectángulo específico usando get_text con clip
+                            text_in_rect = page.get_text("text", clip=r).strip()
+                            text_clean = text_in_rect.strip()
+                            
+                            # Verificar coincidencia EXACTA (sin espacios extra, sin caracteres adicionales)
+                            if text_clean == ph:
+                                matches_exactly = True
+                            else:
+                                # Si no coincide exactamente, verificar que no sea un placeholder diferente
+                                # que es subcadena o supercadena del buscado
+                                # Caso 1: Si el texto encontrado es un placeholder más corto que es subcadena del buscado
+                                # (ej: buscamos "${fecha_emision}" pero encontramos "${fecha_em2}")
+                                if text_clean in placeholders and text_clean != ph:
+                                    # Es otro placeholder, verificar si es subcadena o supercadena
+                                    if text_clean in ph:
+                                        # El texto encontrado es más corto y subcadena del buscado, NO agregar
+                                        matches_exactly = False
+                                    elif ph in text_clean:
+                                        # El texto encontrado es más largo y contiene el buscado, podría ser válido
+                                        # pero solo si el texto es exactamente el placeholder más largo
+                                        matches_exactly = (text_clean == ph)
+                                    else:
+                                        # Son placeholders diferentes sin relación de subcadena, NO agregar
+                                        matches_exactly = False
+                                else:
+                                    # El texto no es un placeholder conocido, podría ser válido si contiene el placeholder
+                                    # Pero para ser seguro, solo aceptar si coincide exactamente
+                                    matches_exactly = False
+                        except Exception:
+                            # Si no se puede obtener el texto, ser conservador y NO agregar
+                            # Esto evita agregar resultados incorrectos
+                            matches_exactly = False
+                        
+                        # Solo agregar si coincide exactamente
+                        if not matches_exactly:
+                            continue
+                        
+                        # Usar 4 decimales para placeholders múltiples, 1 decimal para otros
+                        if is_multi:
+                            rect_key = (round(r.x0, 4), round(r.y0, 4), round(r.x1, 4), round(r.y1, 4))
+                            if rect_key not in seen_rects_multi:
+                                seen_rects_multi[rect_key] = True
+                                result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                        else:
+                            rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                            if rect_key not in seen_rects_normal:
+                                seen_rects_normal[rect_key] = True
+                                result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                
+                # Para placeholders múltiples que ya se encontraron con get_text, 
+                # search_for puede encontrar instancias adicionales, así que no saltamos variaciones
+                # Si no se encontró con search_for, intentar variaciones
+                if (not rects or is_multi) and ph.startswith("${") and ph.endswith("}"):
+                    # Variación 1: sin ${}
                     ph_clean = ph[2:-1]  # Remover ${ y }
                     rects_clean = page.search_for(ph_clean)
-                    for r in rects_clean:
-                        rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
-                        if rect_key not in seen_rects:
-                            seen_rects[rect_key] = True
-                            result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                    if rects_clean:
+                        for r in rects_clean:
+                            # Usar 4 decimales para placeholders múltiples, 1 decimal para otros
+                            if is_multi:
+                                rect_key = (round(r.x0, 4), round(r.y0, 4), round(r.x1, 4), round(r.y1, 4))
+                                if rect_key not in seen_rects_multi:
+                                    seen_rects_multi[rect_key] = True
+                                    result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                            else:
+                                rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                                if rect_key not in seen_rects_normal:
+                                    seen_rects_normal[rect_key] = True
+                                    result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                    
+                    # Variación 2: con espacios alrededor
+                    if not rects_clean:
+                        ph_with_spaces = f" {ph_clean} "
+                        rects_spaces = page.search_for(ph_with_spaces)
+                        if rects_spaces:
+                            for r in rects_spaces:
+                                # Usar 4 decimales para placeholders múltiples, 1 decimal para otros
+                                if is_multi:
+                                    rect_key = (round(r.x0, 4), round(r.y0, 4), round(r.x1, 4), round(r.y1, 4))
+                                    if rect_key not in seen_rects_multi:
+                                        seen_rects_multi[rect_key] = True
+                                        result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                                else:
+                                    rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                                    if rect_key not in seen_rects_normal:
+                                        seen_rects_normal[rect_key] = True
+                                        result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                    
+                    # Variación 3: buscar palabra por palabra para placeholders compuestos
+                    if not rects_clean and not rects_spaces and "_" in ph_clean:
+                        # Para fecha_emision, numero_motor, numero_chasis, etc.
+                        words = ph_clean.split("_")
+                        if len(words) >= 2:
+                            # Buscar la primera palabra seguida de la segunda
+                            search_term = f"{words[0]} {words[1]}"
+                            rects_words = page.search_for(search_term)
+                            if rects_words:
+                                for r in rects_words:
+                                    # Usar 4 decimales para placeholders múltiples, 1 decimal para otros
+                                    if is_multi:
+                                        rect_key = (round(r.x0, 4), round(r.y0, 4), round(r.x1, 4), round(r.y1, 4))
+                                        if rect_key not in seen_rects_multi:
+                                            seen_rects_multi[rect_key] = True
+                                            result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                                    else:
+                                        rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                                        if rect_key not in seen_rects_normal:
+                                            seen_rects_normal[rect_key] = True
+                                            result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+                
+                # Debug: si aún no se encontró, reportar
+                if not result[ph]:
+                    print(f"[CRT] ADVERTENCIA: Placeholder {ph} no encontrado en página {page.number} después de todas las búsquedas")
             except Exception as e:
                 print(f"[CRT] Error buscando placeholder {ph}: {e}")
                 pass
 
-    # Optimización: deduplicación más eficiente usando dict
+    # Optimización: deduplicación más eficiente usando dict con verificación de superposición
+    # Para placeholders que aparecen múltiples veces, eliminar duplicados que se superponen significativamente
     for ph in placeholders:
         if result[ph]:
-            dedup_dict = {}
-            for m in result[ph]:
-                r = m["rect"]
-                key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
-                if key not in dedup_dict:
-                    dedup_dict[key] = m
-            result[ph] = list(dedup_dict.values())
+            # Para placeholders que sabemos que aparecen múltiples veces
+            is_multi_occurrence = ph in multi_occurrence_ph_set
+            
+            if is_multi_occurrence:
+                # Para placeholders múltiples: eliminar duplicados que se superponen significativamente
+                # Esto maneja el caso donde get_text() y search_for() encuentran la misma instancia
+                dedup_list = []
+                for m in result[ph]:
+                    r = m["rect"]
+                    is_duplicate = False
+                    # Verificar si este rectángulo se superpone significativamente con alguno ya agregado
+                    for existing in dedup_list:
+                        if _rects_overlap_significantly(r, existing["rect"], overlap_threshold=0.8):
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        dedup_list.append(m)
+                result[ph] = dedup_list
+                print(f"[CRT] Placeholder {ph} encontrado {len(result[ph])} vez(ces) en la página (después de deduplicación por superposición)")
+            else:
+                # Para otros placeholders: deduplicación normal (1 decimal)
+                dedup_dict = {}
+                for m in result[ph]:
+                    r = m["rect"]
+                    key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                    if key not in dedup_dict:
+                        dedup_dict[key] = m
+                result[ph] = list(dedup_dict.values())
     return result
 
 def _collect_placeholder_matches_with_style(page: fitz.Page, placeholder: str):
@@ -314,7 +515,7 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
     print(f"[CRT] _replace_placeholders_transparente: photo_png disponible: {photo_png is not None}, mapping keys: {list(mapping.keys())}")
     total_counts = {k: 0 for k in mapping.keys()}
     SIZE_MULTIPLIER = {
-        "${fecha_em}": 0.75,
+        "${fecha_em2}": 0.75,
         # "${nombre_apellido2}": 0.50,
         "${documento2}": 0.50,
         # "${localidad2}": 0.50,
@@ -337,10 +538,20 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
         photo_matches = matches_map.get("${photo}", []) if has_photo_placeholder else []
         
-        # Debug: verificar si numero_motor y numero_chasis están en el mapping pero no se encontraron
-        for ph_debug in ("${numero_motor}", "${numero_chasis}"):
+        # Debug: verificar si placeholders problemáticos están en el mapping pero no se encontraron
+        for ph_debug in ("${numero_motor}", "${numero_chasis}", "${fecha_emision}"):
             if ph_debug in mapping and ph_debug not in page_matches:
                 print(f"[CRT] ADVERTENCIA: {ph_debug} está en mapping (valor='{mapping[ph_debug]}') pero no se encontró en la página {page.number}")
+                # Intentar búsqueda manual para debug
+                try:
+                    debug_rects = page.search_for(ph_debug)
+                    print(f"[CRT] DEBUG: búsqueda directa de '{ph_debug}' encontró {len(debug_rects)} resultados")
+                    if not debug_rects and ph_debug.startswith("${") and ph_debug.endswith("}"):
+                        ph_clean_debug = ph_debug[2:-1]
+                        debug_rects_clean = page.search_for(ph_clean_debug)
+                        print(f"[CRT] DEBUG: búsqueda de '{ph_clean_debug}' (sin ${{}}) encontró {len(debug_rects_clean)} resultados")
+                except Exception as e:
+                    print(f"[CRT] DEBUG: error en búsqueda manual: {e}")
 
         # Optimización: acumular todas las redacciones antes de aplicar
         has_redactions = False
@@ -369,8 +580,8 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
             raw_val = mapping.get(ph, "")
             val = _to_upper(raw_val)
             
-            # Debug para numero_motor y numero_chasis
-            if ph in ("${numero_motor}", "${numero_chasis}"):
+            # Debug para placeholders problemáticos
+            if ph in ("${numero_motor}", "${numero_chasis}", "${fecha_emision}"):
                 print(f"[CRT] Procesando {ph}: raw_val='{raw_val}', val='{val}', encontrados={len(ms)} matches")
 
             for m in ms:
@@ -391,26 +602,55 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                 is_vertical_slot = r.height > r.width * 2
 
                 placed = 0
+                text_inserted = False
                 try:
                     if is_crt and is_vertical_slot:
                         placed = page.insert_textbox(
-                            padded, val or "", fontname=fontname, fontsize=size, align=1, rotate=90, opacity=1.0
+                            padded, val or "", fontname=fontname, fontsize=size, align=1, rotate=90
                         )
                     else:
                         placed = page.insert_textbox(
-                            padded, val or "", fontname=fontname, fontsize=size, align=0, opacity=1.0
+                            padded, val or "", fontname=fontname, fontsize=size, align=0
                         )
-                except Exception:
+                    # insert_textbox retorna el número de caracteres insertados
+                    # Si retorna >= longitud del texto, se insertó completamente
+                    # Si retorna > 0 pero < longitud, se insertó parcialmente
+                    # Si retorna 0, no se insertó nada
+                    val_len = len(val) if val else 0
+                    if placed >= val_len:
+                        text_inserted = True  # Se insertó completamente
+                    elif placed > 0:
+                        text_inserted = True  # Se insertó parcialmente, no usar fallback para evitar duplicados
+                    else:
+                        text_inserted = False  # No se insertó nada
+                except Exception as e:
                     placed = 0
+                    text_inserted = False
+                    # Debug para fecha_emision
+                    if ph == "${fecha_emision}":
+                        print(f"[CRT] ERROR en insert_textbox para {ph}: {e}")
 
-                if not placed:
-                    page.insert_text(
-                        (r.x0 + 1, r.y1 - 2),
-                        val or "",
-                        fontname=fontname,
-                        fontsize=size,
-                        rotate=90 if (is_crt and is_vertical_slot) else 0
-                    )
+                # Solo usar insert_text como fallback si NO se insertó NADA con insert_textbox
+                # Esto evita duplicar el texto cuando insert_textbox inserta (aunque sea parcialmente)
+                if not text_inserted and val:
+                    # Debug para fecha_emision
+                    if ph == "${fecha_emision}":
+                        print(f"[CRT] Usando fallback insert_text para {ph} (placed={placed}, val_len={len(val)})")
+                    try:
+                        page.insert_text(
+                            (r.x0 + 1, r.y1 - 2),
+                            val or "",
+                            fontname=fontname,
+                            fontsize=size,
+                            rotate=90 if (is_crt and is_vertical_slot) else 0
+                        )
+                    except Exception as e:
+                        if ph == "${fecha_emision}":
+                            print(f"[CRT] ERROR en insert_text fallback para {ph}: {e}")
+                else:
+                    # Debug para fecha_emision
+                    if ph == "${fecha_emision}":
+                        print(f"[CRT] NO usando fallback para {ph} (text_inserted={text_inserted}, placed={placed})")
                 total_counts[ph] += 1
 
         if qr_png is not None and qr_matches:
@@ -1063,7 +1303,11 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         fecha_emision_dt = insp_created_at
     else:
         fecha_emision_dt = insp_created_at or row["app_date"]
-    fecha_emision = _fmt_date(fecha_emision_dt)
+    fecha_emision = _fmt_date(fecha_emision_dt) if fecha_emision_dt else ""
+    
+    # Debug: verificar que fecha_emision tenga valor
+    if not fecha_emision:
+        print(f"[CRT] ADVERTENCIA: fecha_emision está vacío. insp_created_at={insp_created_at}, app_date={row.get('app_date')}, is_second_inspection={is_second_inspection}")
     fecha_vencimiento = None
     vto_dt_for_db = None
     if fecha_emision_dt:
@@ -1155,7 +1399,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
         "${fecha_vencimiento}":     fecha_vencimiento or "",
-        "${fecha_em}":              fecha_emision or "",
+        "${fecha_em2}":              fecha_emision or "",
         "${fecha_vto}":             fecha_vencimiento or "",
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
@@ -1194,22 +1438,22 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         if photo_png:
             print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
     
-    # Debug: verificar valores de numero_motor y numero_chasis antes de renderizar
-    print(f"[CRT] Valores antes de renderizar: numero_motor='{mapping.get('${numero_motor}', 'NO_ENCONTRADO')}', numero_chasis='{mapping.get('${numero_chasis}', 'NO_ENCONTRADO')}'")
+    # Debug: verificar valores problemáticos antes de renderizar
+    print(f"[CRT] Valores antes de renderizar:")
+    print(f"[CRT]   fecha_emision='{mapping.get('${fecha_emision}', 'NO_ENCONTRADO')}' (fecha_emision_dt={fecha_emision_dt})")
+    print(f"[CRT]   numero_motor='{mapping.get('${numero_motor}', 'NO_ENCONTRADO')}'")
+    print(f"[CRT]   numero_chasis='{mapping.get('${numero_chasis}', 'NO_ENCONTRADO')}'")
     print(f"[CRT] Valores desde BD: engine_number={row.get('engine_number')}, chassis_number={row.get('chassis_number')}")
     
     try:
         pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png, usage_type)
         print(f"[CRT] PDF renderizado exitosamente. Placeholders reemplazados: {counts}")
-        # Debug específico para numero_motor y numero_chasis
-        if "${numero_motor}" in counts:
-            print(f"[CRT] ${{numero_motor}} reemplazado {counts['${numero_motor}']} vez(ces)")
-        else:
-            print(f"[CRT] ADVERTENCIA: ${{numero_motor}} NO fue reemplazado (no encontrado en PDF)")
-        if "${numero_chasis}" in counts:
-            print(f"[CRT] ${{numero_chasis}} reemplazado {counts['${numero_chasis}']} vez(ces)")
-        else:
-            print(f"[CRT] ADVERTENCIA: ${{numero_chasis}} NO fue reemplazado (no encontrado en PDF)")
+        # Debug específico para placeholders problemáticos
+        for ph_check in ("${fecha_emision}", "${numero_motor}", "${numero_chasis}"):
+            if ph_check in counts:
+                print(f"[CRT] {ph_check} reemplazado {counts[ph_check]} vez(ces)")
+            else:
+                print(f"[CRT] ADVERTENCIA: {ph_check} NO fue reemplazado (no encontrado en PDF, valor en mapping='{mapping.get(ph_check, 'NO_ENCONTRADO')}')")
     except Exception as e:
         raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
 
