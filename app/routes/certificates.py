@@ -44,9 +44,9 @@ def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
         # Para domicilio, hacer más agresivo cuando tiene más de 30 caracteres
         if n <= 20: factor = 1.00
         elif n <= 30: factor = 0.85
-        elif n <= 40: factor = 0.55  # Más pequeño que antes (era 0.75)
-        elif n <= 50: factor = 0.40  # Mucho más pequeño (era 0.65)
-        elif n <= 60: factor = 0.30  # Muy pequeño
+        elif n <= 40: factor = 0.60  # Más pequeño que antes (era 0.75)
+        elif n <= 50: factor = 0.45  # Mucho más pequeño (era 0.65)
+        elif n <= 60: factor = 0.35  # Muy pequeño
         else: factor = 0.28  # Extremadamente pequeño (era 0.55)
         s *= factor
     elif ph == "${modelo}":
