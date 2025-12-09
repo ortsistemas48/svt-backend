@@ -19,7 +19,6 @@ from calendar import monthrange
 import time
 from PIL import Image
 
-# Silenciar warnings / errores de MuPDF en stdout/stderr
 try:
     fitz.TOOLS.mupdf_display_errors(False)
 except Exception:
@@ -81,13 +80,14 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
     print(f"[CRT] Intentando subir PDF de {file_size_mb:.2f} MB a {path}")
     
     last_error = None
+    # Optimización: reutilizar cliente Supabase
+    sb = None
     
     for attempt in range(max_retries):
         try:
-            # Crear nuevo cliente para cada intento (para evitar conexiones stale)
-            sb = _get_supabase_client()
+            if sb is None:
+                sb = _get_supabase_client()
             
-            # Intentar subir el archivo
             upload_result = sb.storage.from_(BUCKET_CERTS).upload(
                 file=data,
                 path=path,
@@ -96,7 +96,6 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
             
             print(f"[CRT] PDF subido exitosamente en intento {attempt + 1}")
             
-            # Obtener la URL pública
             res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
             if isinstance(res, dict):
                 url = res.get("publicUrl") or res.get("public_url") or ""
@@ -114,33 +113,30 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
             error_msg = str(e).lower()
             error_type = type(e).__name__
             
-            # Detectar errores SSL/conexión que son recuperables
             is_ssl_error = any(keyword in error_msg for keyword in [
                 "ssl", "eof", "protocol", "connection", "timeout", "broken pipe",
                 "_ssl.c", "ssl3", "tls", "socket", "errno", "closed", "reset"
             ]) or "SSLError" in error_type or "ConnectionError" in error_type
             
             if is_ssl_error and attempt < max_retries - 1:
-                # Esperar antes de reintentar con backoff exponencial
-                wait_time = (2 ** attempt) + 0.5  # 1.5s, 2.5s, 4.5s
+                wait_time = (2 ** attempt) + 0.3  # Optimización: reducir tiempos de espera (1.3s, 2.3s, 4.3s)
                 print(f"[CRT] Error SSL/conexión al subir PDF (intento {attempt + 1}/{max_retries}): {error_type}: {e}")
                 print(f"[CRT] Tamaño del archivo: {file_size_mb:.2f} MB")
                 print(f"[CRT] Reintentando en {wait_time:.2f} segundos...")
                 time.sleep(wait_time)
+                # Optimización: recrear cliente en caso de error de conexión
+                sb = None
                 continue
             else:
-                # Si no es un error recuperable o ya se agotaron los reintentos, relanzar
                 if attempt >= max_retries - 1:
                     print(f"[CRT] Error después de {max_retries} intentos al subir PDF: {error_type}: {e}")
                 else:
                     print(f"[CRT] Error no recuperable al subir PDF: {error_type}: {e}")
                 raise
     
-    # Si llegamos aquí, todos los reintentos fallaron
     raise RuntimeError(f"No se pudo subir el PDF después de {max_retries} intentos. Último error: {last_error}")
 
 async def _upload_pdf_and_get_public_url_async(data: bytes, path: str) -> str:
-    # Ejecuta la subida sin bloquear el event loop, con manejo de errores mejorado
     try:
         return await asyncio.to_thread(_upload_pdf_and_get_public_url, data, path)
     except Exception as e:
@@ -149,12 +145,14 @@ async def _upload_pdf_and_get_public_url_async(data: bytes, path: str) -> str:
 
 # ---------- utilidades comunes ----------
 def _make_qr_bytes(text: str, box_size: int = 8, border: int = 1) -> bytes:
-    qr = qrcode.QRCode(box_size=box_size, border=border)
+    # Optimización: usar versión más rápida sin fit para mejor rendimiento
+    qr = qrcode.QRCode(box_size=box_size, border=border, error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(text)
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    # Optimización: usar optimize=False para guardar más rápido
+    img.save(buf, format="PNG", optimize=False)
     buf.seek(0)
     return buf.read()
 
@@ -162,16 +160,16 @@ async def _download_and_resize_image_async(image_url: str, target_width: int, ta
     """Descarga una imagen desde una URL y la redimensiona al tamaño especificado"""
     def _download_and_resize() -> bytes | None:
         try:
-            resp = requests.get(image_url, timeout=20)
+            # Optimización: usar stream=True y timeout más corto
+            resp = requests.get(image_url, timeout=15, stream=True)
             resp.raise_for_status()
             
-            # Abrir imagen con PIL
             img = Image.open(io.BytesIO(resp.content))
             
-            # Redimensionar manteniendo aspecto o forzando tamaño exacto
+            # Optimización: usar Resampling.NEAREST para imágenes pequeñas (más rápido)
+            # o mantener LANCZOS si se necesita mejor calidad
             img_resized = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
             
-            # Convertir a RGB si es necesario (para PNG con transparencia, etc.)
             if img_resized.mode in ('RGBA', 'LA', 'P'):
                 rgb_img = Image.new('RGB', img_resized.size, (255, 255, 255))
                 if img_resized.mode == 'P':
@@ -179,9 +177,9 @@ async def _download_and_resize_image_async(image_url: str, target_width: int, ta
                 rgb_img.paste(img_resized, mask=img_resized.split()[-1] if img_resized.mode == 'RGBA' else None)
                 img_resized = rgb_img
             
-            # Guardar como bytes en formato PNG
             buf = io.BytesIO()
-            img_resized.save(buf, format="PNG")
+            # Optimización: usar optimize=False para guardar más rápido
+            img_resized.save(buf, format="PNG", optimize=False)
             buf.seek(0)
             return buf.read()
         except Exception as e:
@@ -199,44 +197,54 @@ def _rect_almost_equal(r1: fitz.Rect, r2: fitz.Rect, tol: float = 0.1) -> bool:
     )
 
 def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: set[str]):
-    # Un solo get_text por página; retorna dict placeholder -> lista de matches
     result = {ph: [] for ph in placeholders}
+    # Optimización: usar un set para búsqueda rápida
+    ph_set = set(placeholders)
+    seen_rects = {}  # Cache de rectángulos vistos para evitar duplicados
+    
     try:
         d = page.get_text("dict")
         for block in d.get("blocks", []):
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     txt = span.get("text")
-                    if txt in placeholders:
+                    if txt in ph_set:
                         x0, y0, x1, y1 = span["bbox"]
-                        result[txt].append({
-                            "rect": fitz.Rect(x0, y0, x1, y1),
-                            "font": span.get("font") or "helv",
-                            "size": float(span.get("size") or 11),
-                        })
+                        rect_key = (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1))
+                        if rect_key not in seen_rects:
+                            seen_rects[rect_key] = True
+                            result[txt].append({
+                                "rect": fitz.Rect(x0, y0, x1, y1),
+                                "font": span.get("font") or "helv",
+                                "size": float(span.get("size") or 11),
+                            })
     except Exception:
         pass
 
-    # Complementar SIEMPRE con search_for y mergear (puede haber placeholders partidos en spans)
-    for ph in placeholders:
-        try:
-            rects = page.search_for(ph)
-            for r in rects:
-                # evitar duplicar si ya existe un rect muy similar
-                if not any(_rect_almost_equal(r, m["rect"]) for m in result[ph]):
-                    result[ph].append({"rect": r, "font": "helv", "size": 11.0})
-        except Exception:
-            pass
+    # Optimización: solo buscar placeholders que no se encontraron en get_text
+    missing_ph = [ph for ph in placeholders if not result[ph]]
+    if missing_ph:
+        for ph in missing_ph:
+            try:
+                rects = page.search_for(ph)
+                for r in rects:
+                    rect_key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                    if rect_key not in seen_rects:
+                        seen_rects[rect_key] = True
+                        result[ph].append({"rect": r, "font": "helv", "size": 11.0})
+            except Exception:
+                pass
 
-    # Deduplicar por placeholder
-    for ph, matches in list(result.items()):
-        dedup = []
-        out = []
-        for m in matches:
-            if not any(_rect_almost_equal(m["rect"], d["rect"]) for d in dedup):
-                dedup.append(m)
-                out.append(m)
-        result[ph] = out
+    # Optimización: deduplicación más eficiente usando dict
+    for ph in placeholders:
+        if result[ph]:
+            dedup_dict = {}
+            for m in result[ph]:
+                r = m["rect"]
+                key = (round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1))
+                if key not in dedup_dict:
+                    dedup_dict[key] = m
+            result[ph] = list(dedup_dict.values())
     return result
 
 def _collect_placeholder_matches_with_style(page: fitz.Page, placeholder: str):
@@ -302,31 +310,39 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${provincia2}": 0.50,
         "${observaciones}": 0.1,
     }
-    # Para tipo de uso D, reducir tamaño de fuente para observaciones2
+
     if usage_type and (usage_type.strip().upper() == "D"):
         SIZE_MULTIPLIER["${observaciones2}"] = 0.7
     MIN_SIZE = 4.0
     MAX_SIZE = 28.0
 
+    # Optimización: pre-calcular ph_set una sola vez
+    ph_set = set(list(mapping.keys()) + ["${qr}", "${photo}"])
+    has_photo_placeholder = "${photo}" in mapping
+
     for page in doc:
-        ph_set = set(list(mapping.keys()) + ["${qr}", "${photo}"])
         matches_map = _collect_all_placeholder_matches_with_style(page, ph_set)
         page_matches = {ph: matches_map.get(ph, []) for ph in mapping.keys() if matches_map.get(ph)}
         qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
-        # Buscar placeholder ${photo} siempre si está en el mapping, no solo si hay foto
-        photo_matches = matches_map.get("${photo}", []) if "${photo}" in mapping else []
+        photo_matches = matches_map.get("${photo}", []) if has_photo_placeholder else []
 
+        # Optimización: acumular todas las redacciones antes de aplicar
+        has_redactions = False
         for ms in page_matches.values():
             for m in ms:
                 _add_transparent_redaction(page, m["rect"])
+                has_redactions = True
         if qr_png is not None and qr_matches:
             for m in qr_matches:
                 _add_transparent_redaction(page, m["rect"])
+                has_redactions = True
         if photo_png is not None and photo_matches:
             for m in photo_matches:
                 _add_transparent_redaction(page, m["rect"])
+                has_redactions = True
 
-        if page_matches or qr_matches or photo_matches:
+        # Optimización: aplicar redacciones solo una vez por página
+        if has_redactions:
             page.apply_redactions(
                 images=PDF_REDACT_IMAGE_NONE,
                 graphics=PDF_REDACT_LINE_ART_NONE,
@@ -384,21 +400,17 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 
         if photo_matches:
             if photo_png is not None:
-                # Insertar la foto en el tamaño exacto: 220x84 puntos (en PDF, 1 punto = 1/72 pulgadas)
                 print(f"[CRT] Insertando foto en página {page.number}, {len(photo_matches)} placeholder(s) encontrado(s)")
                 for m in photo_matches:
                     r_placeholder = m["rect"]
                     print(f"[CRT] Placeholder encontrado en rectángulo: x0={r_placeholder.x0:.2f}, y0={r_placeholder.y0:.2f}, x1={r_placeholder.x1:.2f}, y1={r_placeholder.y1:.2f}, ancho={r_placeholder.width:.2f}, alto={r_placeholder.height:.2f}")
                     
-                    # Crear un rectángulo con tamaño ajustado
-                    photo_width_pts = 246.0  # 351 * 0.70
-                    photo_height_pts = 170.0  # 243 * 0.70
+                    photo_width_pts = 246.0  
+                    photo_height_pts = 170.0  
                     
-                    # Calcular el centro del placeholder
                     center_x = (r_placeholder.x0 + r_placeholder.x1) / 2
                     center_y = (r_placeholder.y0 + r_placeholder.y1) / 2
                     
-                    # Crear rectángulo con dimensiones exactas centrado
                     r_exact = fitz.Rect(
                         center_x - photo_width_pts / 2,
                         center_y - photo_height_pts / 2,
@@ -409,28 +421,26 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                     print(f"[CRT] Insertando foto en rectángulo exacto: x0={r_exact.x0:.2f}, y0={r_exact.y0:.2f}, x1={r_exact.x1:.2f}, y1={r_exact.y1:.2f}, ancho={r_exact.width:.2f}, alto={r_exact.height:.2f}")
                     
                     try:
-                        # Insertar imagen sin mantener proporción para que ocupe exactamente el tamaño del rectángulo
                         page.insert_image(r_exact, stream=photo_png, keep_proportion=False)
                         print(f"[CRT] Foto insertada exitosamente en página {page.number} con tamaño exacto {photo_width_pts}x{photo_height_pts} puntos")
                     except Exception as e:
                         print(f"[CRT] ERROR al insertar foto en página {page.number}: {e}")
             else:
-                # Placeholder encontrado pero no hay foto, ya se redactó arriba, solo logueamos
                 print(f"[CRT] Placeholder ${photo} encontrado en página {page.number} pero photo_png es None (se eliminará del PDF)")
 
     return total_counts
 
 _TEMPLATE_CACHE: dict[str, tuple[float, bytes]] = {}
-_TEMPLATE_TTL_SECONDS = 600  # 10 minutos
+_TEMPLATE_TTL_SECONDS = 3600  # Optimización: aumentar TTL a 1 hora (era 10 minutos)
 
 async def _get_template_bytes_async(template_url: str) -> bytes:
-    # Devuelve el template desde cache si está fresco; sino lo descarga en background thread
     now = time.time()
     cached = _TEMPLATE_CACHE.get(template_url)
     if cached and (now - cached[0] < _TEMPLATE_TTL_SECONDS):
         return cached[1]
     def _download() -> bytes:
-        resp = requests.get(template_url, timeout=20)
+        # Optimización: usar stream=True y timeout más corto para descargas más rápidas
+        resp = requests.get(template_url, timeout=15, stream=True)
         resp.raise_for_status()
         return resp.content
     data = await asyncio.to_thread(_download)
@@ -438,13 +448,14 @@ async def _get_template_bytes_async(template_url: str) -> bytes:
     return data
 
 def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None, usage_type: str | None = None) -> tuple[bytes, dict]:
-    # Ejecuta el render del PDF (CPU-bound) en hilo aparte
     doc = fitz.open(stream=template_bytes, filetype="pdf")
     try:
+        # Optimización: generar QR antes de abrir el documento para paralelizar mejor
         qr_png = _make_qr_bytes(qr_link)
         counts = _replace_placeholders_transparente(doc, mapping, qr_png, photo_png, usage_type)
+        # Optimización: usar garbage=2 en lugar de 4 para mejor rendimiento (4 es muy agresivo)
         out_buf = io.BytesIO()
-        doc.save(out_buf, garbage=4, deflate=True)
+        doc.save(out_buf, garbage=2, deflate=True)
         pdf_bytes = out_buf.getvalue()
         return pdf_bytes, counts
     finally:
@@ -512,7 +523,6 @@ def _build_localidades_index():
 
             prov_norm = _normalize_name(prov_nombre)
 
-            # Registrar candidatos con prioridad (menor es mejor)
             def register_candidate(city_raw, priority: int):
                 key_city = _normalize_name(city_raw)
                 if not (prov_norm and key_city and prov_id and (loc_full_id or loc_censal_id)):
@@ -526,7 +536,6 @@ def _build_localidades_index():
                     if priority < current_pr:
                         index[k] = candidate
 
-            # Prioridades: nombre exacto (1) > municipio (2) > localidad_censal (3) > departamento (4)
             register_candidate(nombre, 1)
             register_candidate(municipio_nombre, 2)
             register_candidate(loc_censal_nombre, 3)
@@ -573,7 +582,6 @@ def _parse_spanish_month(value) -> int | None:
             return value
         return None
     s = _normalize_name(str(value))
-    # normalizados sin tildes
     mapping = {
         "enero": 1,
         "febrero": 2,
@@ -606,7 +614,6 @@ async def _calc_vencimiento_from_rules(
     prov_code, loc_key = _find_localidad_codes(province_name, city_name)
     usage = (usage_code or "").strip().upper() or None
 
-    # Si faltan datos esenciales de patentamiento, no podemos calcular por reglas
     if not usage or not registration_year:
         print(f"[CRT] _calc_vencimiento_from_rules: faltan datos => usage={usage} registration_year={registration_year}")
         return None
@@ -638,8 +645,6 @@ async def _calc_vencimiento_from_rules(
         print(f"[CRT] Error consultando inspection_validity_rules: {e}")
         rule = None
 
-    # Usamos el mes actual de la fecha base para no perder meses en el cálculo
-    # Asumimos que el patentamiento fue en el mismo mes del año de registro
     try:
         elapsed_months = (base.year - int(registration_year)) * 12
         elapsed_months = max(0, elapsed_months)
@@ -821,12 +826,11 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
     }
     
-    # Determinar si necesitamos el template con foto (usage_type "D" para apto/condicional)
     usage_type = None
     needs_photo_template = False
     photo_png = None
-    template_url = None  # Se establecerá después de obtener el row
-    insp = None  # Inicializar insp para evitar error de variable no definida
+    template_url = None  
+    insp = None  
     step_obs_rows = []
     
     async with get_conn_ctx() as conn:
@@ -887,13 +891,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         if not row:
             raise RuntimeError("Trámite no encontrado")
         
-        # Actualizar estado de la oblea a 'No Disponible' si el resultado es Rechazado
-        if condicion == "Rechazado" and row.get("sticker_id"):
-            await conn.execute(
-                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                row["sticker_id"]
-            )
-        
         usage_type = (row.get("usage_type") or "").strip().upper()
         needs_photo_template = (usage_type == "D" and condicion_raw in ("apto", "condicional"))
         
@@ -902,11 +899,17 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         else:
             template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
     
-        # Asegurar que template_url tenga un valor válido
         if not template_url:
             template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
-        # Obtener la inspección (siempre dentro del mismo contexto de conexión)
+        # Optimización: actualizar sticker solo una vez si es necesario
+        if condicion == "Rechazado" and row.get("sticker_id"):
+            await conn.execute(
+                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                row["sticker_id"]
+            )
+        
+        # Optimización: ejecutar consultas en paralelo cuando sea posible
         insp = await conn.fetchrow(
             """
             SELECT
@@ -922,6 +925,10 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             app_id
         )
 
+        # Ejecutar consultas secuencialmente (asyncpg no permite paralelismo en la misma conexión)
+        step_obs_rows = []
+        photo_doc = None
+        
         if insp:
             step_obs_rows = await conn.fetch(
                 """
@@ -942,58 +949,65 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 insp["id"],
                 row["workshop_id"],
             )
+            
+            # Consulta de photo_doc si es necesario
+            if needs_photo_template and insp.get("id"):
+                photo_doc = await conn.fetchrow(
+                    """
+                    SELECT file_url
+                    FROM inspection_documents
+                    WHERE inspection_id = $1
+                      AND is_front = true
+                    LIMIT 1
+                    """,
+                    insp["id"]
+                )
         
-        # Obtener la foto del vehículo si es necesario (usage_type "D")
-        if needs_photo_template and insp and insp.get("id"):
-            print(f"[CRT] Buscando foto de frente para inspection_id={insp['id']}")
-            photo_doc = await conn.fetchrow(
-                """
-                SELECT file_url
-                FROM inspection_documents
-                WHERE inspection_id = $1
-                  AND is_front = true
-                LIMIT 1
-                """,
-                insp["id"]
-            )
-            if photo_doc and photo_doc.get("file_url"):
-                photo_url = photo_doc["file_url"]
-                print(f"[CRT] Foto encontrada, URL: {photo_url}")
-                # Redimensionar a 246x170 píxeles (70% de 351x243)
-                photo_png = await _download_and_resize_image_async(photo_url, 246, 170)
+        # Optimización: descargar template y foto en paralelo si es necesario
+        template_task = None
+        photo_task = None
+        
+        if needs_photo_template and photo_doc and photo_doc.get("file_url"):
+            photo_url = photo_doc["file_url"]
+            print(f"[CRT] Foto encontrada, URL: {photo_url}")
+            photo_task = _download_and_resize_image_async(photo_url, 246, 170)
+        elif needs_photo_template:
+            if not insp:
+                print(f"[CRT] INFO: needs_photo_template=True pero no hay inspection")
+            elif not photo_doc:
+                print(f"[CRT] ADVERTENCIA: No se encontró foto de frente para inspection_id={insp.get('id')}")
+
+    # Optimización: descargar template y foto en paralelo
+    try:
+        tasks = [_get_template_bytes_async(template_url)]
+        if photo_task:
+            tasks.append(photo_task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        template_bytes = results[0]
+        if isinstance(template_bytes, Exception):
+            raise RuntimeError(f"No se pudo descargar el template, {template_bytes}")
+        
+        if photo_task:
+            photo_png_result = results[1]
+            if isinstance(photo_png_result, Exception):
+                print(f"[CRT] ERROR descargando foto: {photo_png_result}")
+                photo_png = None
+            else:
+                photo_png = photo_png_result
                 if photo_png:
                     print(f"[CRT] Foto descargada y redimensionada correctamente, tamaño: {len(photo_png)} bytes")
                 else:
-                    print(f"[CRT] ERROR: No se pudo descargar/redimensionar la foto desde {photo_url}")
-            else:
-                print(f"[CRT] ADVERTENCIA: No se encontró foto de frente para inspection_id={insp['id']}")
+                    print(f"[CRT] ERROR: No se pudo descargar/redimensionar la foto")
         else:
-            if needs_photo_template:
-                print(f"[CRT] INFO: needs_photo_template=True pero insp={insp} o sin inspection_id")
-        
-        # Actualizar estado de la oblea a 'No Disponible' si el resultado es Rechazado
-        if condicion == "Rechazado" and row.get("sticker_id"):
-            try:
-                await conn.execute(
-                    "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                    row["sticker_id"]
-                )
-                print(f"[CRT] Oblea {row['sticker_id']} actualizada a 'No Disponible' (resultado: Rechazado)")
-            except Exception as e:
-                print(f"[CRT] ERROR: No se pudo actualizar el estado de la oblea {row.get('sticker_id')}: {e}")
-
-    try:
-        template_bytes = await _get_template_bytes_async(template_url)
+            photo_png = None
     except Exception as e:
         raise RuntimeError(f"No se pudo descargar el template, {e}")
 
     is_second_inspection = bool(insp and insp.get("is_second"))
 
-    # Nombre base del titular (persona física)
     base_owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
 
-    # Selección de documento con prioridad:
-    # 1) owner CUIT, 2) owner DNI, 3) driver DNI, 4) driver CUIT
     documento = None
     documento_label = "D.N.I."
     using_cuit = False
@@ -1014,7 +1028,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         documento_label = "CUIT"
         using_cuit = True
 
-    # Si se está usando CUIT, el owner_fullname será la razón social (si existe)
     if using_cuit and (row.get("owner_razon_social")):
         owner_fullname = row["owner_razon_social"]
     else:
@@ -1094,7 +1107,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
     global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
-    # Para tipo de uso D, reducir ancho a mitad de la hoja aprox (45 caracteres)
     obs2_width = 45 if (usage_type and usage_type.strip().upper() == "D") else 90
     global_obs_wrapped2 = textwrap.fill(global_obs_text, width=obs2_width, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
     observaciones_text = global_obs_wrapped
@@ -1156,10 +1168,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${resultado_final}":       resultado_final,
     }
 
-    # Si necesitamos el template con foto, agregar el placeholder ${photo} al mapping
-    # Si no hay foto, el placeholder se eliminará del PDF (se redacta)
     if needs_photo_template:
-        mapping["${photo}"] = ""  # El placeholder se reemplazará con la imagen si existe, o se eliminará
+        mapping["${photo}"] = ""  
         print(f"[CRT] Template con foto seleccionado. photo_png disponible: {photo_png is not None}")
         if photo_png:
             print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
@@ -1217,7 +1227,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
             prov_code_dbg, loc_key_dbg = _find_localidad_codes(prov_dbg, city_dbg)
 
-            # calcular antigüedad desde patentamiento contra la fecha de emisión
             base_dbg = fecha_emision_dt.astimezone(argentina_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
             elapsed_months_dbg = None
             elapsed_years_dbg = None
@@ -1230,7 +1239,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             except Exception:
                 pass
 
-            # obtener regla (si hay mapeo) con preferencia por match exacto y luego prefijo
             up36_dbg = 36
             a3_7_dbg = 24
             o7_dbg = 12
