@@ -1130,6 +1130,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             c.insurance        AS insurance,
             c.vehicle_type     AS vehicle_type,
             c.usage_type       AS usage_type,
+            c.type_ced         AS car_type_ced,
 
             ws.razon_social AS workshop_name,
             ws.plant_number AS workshop_plant_number,
@@ -1432,6 +1433,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${combustible}":           row["fuel_type"] or "",
         "${marca_chasis}":          row["chassis_brand"] or "",
         "${numero_chasis}":         str(row["chassis_number"] or ""),
+        "${ced_tipo}":              str(row["car_type_ced"] or ""),
         "${tipo_vehiculo}":         tipo_puro,
         "${resultado_inspeccion}":  resultado_mapeo_principal,
         "${observaciones}":         observaciones_text,
