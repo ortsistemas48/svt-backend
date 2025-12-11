@@ -315,7 +315,7 @@ async def add_or_update_car(app_id):
                 chassis_number, chassis_brand, green_card_number,
                 green_card_expiration, license_number, license_expiration,
                 vehicle_type, usage_type, owner_id, driver_id, insurance, sticker_id,
-                total_weight, front_weight, back_weight, registration_year, license_class
+                total_weight, front_weight, back_weight, registration_year, license_class, type_ced
                 )
                 VALUES (
                 $1, $2, $3, $4, $5,
@@ -323,7 +323,7 @@ async def add_or_update_car(app_id):
                 $9, $10, $11,
                 $12, $13, $14,
                 $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24, $25
+                $21, $22, $23, $24, $25, $26
                 )
                 ON CONFLICT (license_plate) DO UPDATE SET
                 brand = COALESCE(EXCLUDED.brand, cars.brand),
@@ -349,7 +349,8 @@ async def add_or_update_car(app_id):
                 front_weight = COALESCE(EXCLUDED.front_weight, cars.front_weight),
                 back_weight = COALESCE(EXCLUDED.back_weight, cars.back_weight),
                 registration_year = COALESCE(EXCLUDED.registration_year, cars.registration_year),
-                license_class = COALESCE(EXCLUDED.license_class, cars.license_class)
+                license_class = COALESCE(EXCLUDED.license_class, cars.license_class),
+                type_ced = COALESCE(EXCLUDED.type_ced, cars.type_ced)
                 RETURNING id
             """,
             license_plate, data.get("brand"), data.get("model"), data.get("fuel_type"), data.get("weight"),
@@ -357,7 +358,7 @@ async def add_or_update_car(app_id):
             data.get("chassis_number"), data.get("chassis_brand"), data.get("green_card_number"),
             green_card_expiration, data.get("license_number"), license_expiration, data.get("vehicle_type"), 
             data.get("usage_type"), owner_id, driver_id, data.get("insurance"), sticker_id, data.get("total_weight"),
-            data.get("front_weight"), data.get("back_weight"), data.get("registration_year"), data.get("license_class"))
+            data.get("front_weight"), data.get("back_weight"), data.get("registration_year"), data.get("license_class"), data.get("type_ced"))
 
             await conn.execute("""
                 UPDATE applications
@@ -531,7 +532,11 @@ async def get_application_full(id):
                     if car_dict.get(k) is not None and hasattr(car_dict[k], "isoformat"):
                         car_dict[k] = car_dict[k].isoformat()
                 
-                # Add green_card_no_expiration field based on whether expiration is NULL
+                # Ensure type_ced is included (handle None values)
+                if "type_ced" not in car_dict:
+                    car_dict["type_ced"] = None
+                elif car_dict.get("type_ced") is None:
+                    car_dict["type_ced"] = None
                 
 
                 if sticker:
