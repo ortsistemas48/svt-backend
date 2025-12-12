@@ -520,6 +520,7 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${documento2}": 0.50,
         # "${localidad2}": 0.50,
         "${provincia2}": 0.50,
+        "${ced_tipo2}": 0.70,
         "${observaciones}": 0.1,
     }
 
@@ -1434,6 +1435,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${marca_chasis}":          row["chassis_brand"] or "",
         "${numero_chasis}":         str(row["chassis_number"] or ""),
         "${ced_tipo}":              str(row["car_type_ced"] or ""),
+        "${ced_tipo2}":             str(row["car_type_ced"] or ""),
         "${tipo_vehiculo}":         tipo_puro,
         "${resultado_inspeccion}":  resultado_mapeo_principal,
         "${observaciones}":         observaciones_text,
