@@ -1,5 +1,5 @@
 # app/email.py
-import os, secrets, httpx, logging, base64
+import os, secrets, httpx, logging
 from typing import Optional, List, Dict
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
@@ -391,6 +391,7 @@ async def send_certificate_email(
     pdf_bytes: bytes,
     pdf_filename: str,
     owner_name: str,
+    sticker_number: Optional[str] = None,
     car_plate: Optional[str] = None,
     fecha_emision: Optional[str] = None,
     fecha_vencimiento: Optional[str] = None,
@@ -399,13 +400,14 @@ async def send_certificate_email(
     workshop_name: Optional[str] = None,
 ):
     """
-    Envía el certificado PDF por email al owner.
+    Envía el certificado por email al owner con link al QR.
     
     Args:
         to_email: Email del destinatario
-        pdf_bytes: Bytes del PDF del certificado
-        pdf_filename: Nombre del archivo PDF (ej: "certificado.pdf")
+        pdf_bytes: Bytes del PDF del certificado (ya no se envía, solo para compatibilidad)
+        pdf_filename: Nombre del archivo PDF (ya no se usa, solo para compatibilidad)
         owner_name: Nombre completo del titular
+        sticker_number: Número de oblea para el link QR
         car_plate: Dominio del vehículo
         fecha_emision: Fecha de emisión formateada
         fecha_vencimiento: Fecha de vencimiento formateada (opcional)
@@ -445,8 +447,23 @@ async def send_certificate_email(
     
     detalles_html += """
       </div>
+    """
+    
+    # Agregar link al QR si tenemos el número de oblea
+    if sticker_number:
+        qr_url = f"{FRONTEND_URL}/qr/{sticker_number}"
+        detalles_html += f"""
       <p style="color: #777; font-size: 13px; margin-top: 14px;">
-        El certificado se encuentra adjunto a este correo en formato PDF.
+        Podés visualizar los detalles haciendo clic en el siguiente enlace:
+      </p>
+      <p style="margin-top: 8px;">
+        <a href="{qr_url}" style="color: #0040B8; text-decoration: underline; font-size: 14px;">{qr_url}</a>
+      </p>
+    """
+    else:
+        detalles_html += """
+      <p style="color: #777; font-size: 13px; margin-top: 14px;">
+        Hubo un error al generar el link para visualizar los detalles. Por favor, contactá al soporte.
       </p>
     """
     
@@ -459,14 +476,5 @@ async def send_certificate_email(
         extra_html=detalles_html,
     )
     
-    # Codificar el PDF en base64 para el adjunto
-    pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-    
-    attachments = [
-        {
-            "filename": pdf_filename,
-            "content": pdf_base64,
-        }
-    ]
-    
-    return await _send_email(to_email, subject, html, attachments=attachments)
+    # Ya no se envía el PDF adjunto, solo el link al QR
+    return await _send_email(to_email, subject, html)

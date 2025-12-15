@@ -1593,6 +1593,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 pdf_bytes=pdf_bytes,
                 pdf_filename=file_name,
                 owner_name=owner_fullname,
+                sticker_number=oblea,
                 car_plate=row["car_plate"],
                 fecha_emision=fecha_emision,
                 fecha_vencimiento=fecha_vencimiento,
