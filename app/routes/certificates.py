@@ -1421,7 +1421,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
-        "${localidad}":             localidad or "",
+        "${f_localidad}":             localidad or "",
         "${localidad2}":            f"{localidad} ({provincia})" if localidad or provincia else "",
         "${provincia}":             provincia or "",
         "${provincia2}":            provincia or "",
