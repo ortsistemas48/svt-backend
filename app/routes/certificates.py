@@ -87,7 +87,6 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
         RuntimeError: Si no se pudo subir después de todos los reintentos
     """
     file_size_mb = len(data) / (1024 * 1024)
-    print(f"[CRT] Intentando subir PDF de {file_size_mb:.2f} MB a {path}")
     
     last_error = None
     # Optimización: reutilizar cliente Supabase
@@ -104,8 +103,6 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
                 file_options={"content-type": "application/pdf", "x-upsert": "true"},
             )
             
-            print(f"[CRT] PDF subido exitosamente en intento {attempt + 1}")
-            
             res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
             if isinstance(res, dict):
                 url = res.get("publicUrl") or res.get("public_url") or ""
@@ -113,7 +110,6 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
                 url = str(res)
             
             if url:
-                print(f"[CRT] URL pública obtenida: {url}")
                 return url
             else:
                 raise RuntimeError("No se pudo obtener la URL pública del archivo subido")
@@ -130,18 +126,11 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
             
             if is_ssl_error and attempt < max_retries - 1:
                 wait_time = (2 ** attempt) + 0.3  # Optimización: reducir tiempos de espera (1.3s, 2.3s, 4.3s)
-                print(f"[CRT] Error SSL/conexión al subir PDF (intento {attempt + 1}/{max_retries}): {error_type}: {e}")
-                print(f"[CRT] Tamaño del archivo: {file_size_mb:.2f} MB")
-                print(f"[CRT] Reintentando en {wait_time:.2f} segundos...")
                 time.sleep(wait_time)
                 # Optimización: recrear cliente en caso de error de conexión
                 sb = None
                 continue
             else:
-                if attempt >= max_retries - 1:
-                    print(f"[CRT] Error después de {max_retries} intentos al subir PDF: {error_type}: {e}")
-                else:
-                    print(f"[CRT] Error no recuperable al subir PDF: {error_type}: {e}")
                 raise
     
     raise RuntimeError(f"No se pudo subir el PDF después de {max_retries} intentos. Último error: {last_error}")
@@ -193,7 +182,6 @@ async def _download_and_resize_image_async(image_url: str, target_width: int, ta
             buf.seek(0)
             return buf.read()
         except Exception as e:
-            print(f"[CRT] Error descargando/redimensionando imagen desde {image_url}: {e}")
             return None
     
     return await asyncio.to_thread(_download_and_resize)
@@ -420,9 +408,8 @@ def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: s
                 
                 # Debug: si aún no se encontró, reportar
                 if not result[ph]:
-                    print(f"[CRT] ADVERTENCIA: Placeholder {ph} no encontrado en página {page.number} después de todas las búsquedas")
+                    pass
             except Exception as e:
-                print(f"[CRT] Error buscando placeholder {ph}: {e}")
                 pass
 
     # Optimización: deduplicación más eficiente usando dict con verificación de superposición
@@ -447,7 +434,6 @@ def _collect_all_placeholder_matches_with_style(page: fitz.Page, placeholders: s
                     if not is_duplicate:
                         dedup_list.append(m)
                 result[ph] = dedup_list
-                print(f"[CRT] Placeholder {ph} encontrado {len(result[ph])} vez(ces) en la página (después de deduplicación por superposición)")
             else:
                 # Para otros placeholders: deduplicación normal (1 decimal)
                 dedup_dict = {}
@@ -512,7 +498,6 @@ def _to_upper(val) -> str:
     return str(val).upper()
 
 def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, str], qr_png: bytes | None, photo_png: bytes | None = None, usage_type: str | None = None):
-    print(f"[CRT] _replace_placeholders_transparente: photo_png disponible: {photo_png is not None}, mapping keys: {list(mapping.keys())}")
     total_counts = {k: 0 for k in mapping.keys()}
     SIZE_MULTIPLIER = {
         "${fecha_em2}": 0.75,
@@ -542,17 +527,14 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         # Debug: verificar si placeholders problemáticos están en el mapping pero no se encontraron
         for ph_debug in ("${numero_motor}", "${numero_chasis}", "${fecha_emision}"):
             if ph_debug in mapping and ph_debug not in page_matches:
-                print(f"[CRT] ADVERTENCIA: {ph_debug} está en mapping (valor='{mapping[ph_debug]}') pero no se encontró en la página {page.number}")
                 # Intentar búsqueda manual para debug
                 try:
                     debug_rects = page.search_for(ph_debug)
-                    print(f"[CRT] DEBUG: búsqueda directa de '{ph_debug}' encontró {len(debug_rects)} resultados")
                     if not debug_rects and ph_debug.startswith("${") and ph_debug.endswith("}"):
                         ph_clean_debug = ph_debug[2:-1]
                         debug_rects_clean = page.search_for(ph_clean_debug)
-                        print(f"[CRT] DEBUG: búsqueda de '{ph_clean_debug}' (sin ${{}}) encontró {len(debug_rects_clean)} resultados")
                 except Exception as e:
-                    print(f"[CRT] DEBUG: error en búsqueda manual: {e}")
+                    pass
 
         # Optimización: acumular todas las redacciones antes de aplicar
         has_redactions = False
@@ -583,7 +565,7 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
             
             # Debug para placeholders problemáticos
             if ph in ("${numero_motor}", "${numero_chasis}", "${fecha_emision}"):
-                print(f"[CRT] Procesando {ph}: raw_val='{raw_val}', val='{val}', encontrados={len(ms)} matches")
+                pass
 
             for m in ms:
                 fontname = m["font"] if m["font"] in (
@@ -627,16 +609,10 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                 except Exception as e:
                     placed = 0
                     text_inserted = False
-                    # Debug para fecha_emision
-                    if ph == "${fecha_emision}":
-                        print(f"[CRT] ERROR en insert_textbox para {ph}: {e}")
 
                 # Solo usar insert_text como fallback si NO se insertó NADA con insert_textbox
                 # Esto evita duplicar el texto cuando insert_textbox inserta (aunque sea parcialmente)
                 if not text_inserted and val:
-                    # Debug para fecha_emision
-                    if ph == "${fecha_emision}":
-                        print(f"[CRT] Usando fallback insert_text para {ph} (placed={placed}, val_len={len(val)})")
                     try:
                         page.insert_text(
                             (r.x0 + 1, r.y1 - 2),
@@ -646,12 +622,7 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                             rotate=90 if (is_crt and is_vertical_slot) else 0
                         )
                     except Exception as e:
-                        if ph == "${fecha_emision}":
-                            print(f"[CRT] ERROR en insert_text fallback para {ph}: {e}")
-                else:
-                    # Debug para fecha_emision
-                    if ph == "${fecha_emision}":
-                        print(f"[CRT] NO usando fallback para {ph} (text_inserted={text_inserted}, placed={placed})")
+                        pass
                 total_counts[ph] += 1
 
         if qr_png is not None and qr_matches:
@@ -661,10 +632,8 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 
         if photo_matches:
             if photo_png is not None:
-                print(f"[CRT] Insertando foto en página {page.number}, {len(photo_matches)} placeholder(s) encontrado(s)")
                 for m in photo_matches:
                     r_placeholder = m["rect"]
-                    print(f"[CRT] Placeholder encontrado en rectángulo: x0={r_placeholder.x0:.2f}, y0={r_placeholder.y0:.2f}, x1={r_placeholder.x1:.2f}, y1={r_placeholder.y1:.2f}, ancho={r_placeholder.width:.2f}, alto={r_placeholder.height:.2f}")
                     
                     photo_width_pts = 246.0  
                     photo_height_pts = 170.0  
@@ -679,15 +648,10 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
                         center_y + photo_height_pts / 2
                     )
                     
-                    print(f"[CRT] Insertando foto en rectángulo exacto: x0={r_exact.x0:.2f}, y0={r_exact.y0:.2f}, x1={r_exact.x1:.2f}, y1={r_exact.y1:.2f}, ancho={r_exact.width:.2f}, alto={r_exact.height:.2f}")
-                    
                     try:
                         page.insert_image(r_exact, stream=photo_png, keep_proportion=False)
-                        print(f"[CRT] Foto insertada exitosamente en página {page.number} con tamaño exacto {photo_width_pts}x{photo_height_pts} puntos")
                     except Exception as e:
-                        print(f"[CRT] ERROR al insertar foto en página {page.number}: {e}")
-            else:
-                print(f"[CRT] Placeholder ${photo} encontrado en página {page.number} pero photo_png es None (se eliminará del PDF)")
+                        pass
 
     return total_counts
 
@@ -868,7 +832,6 @@ async def _calc_vencimiento_from_rules(
     now_tz: pytz.BaseTzInfo,
 ) -> datetime | None:
     if not fecha_emision_dt:
-        print("[CRT] _calc_vencimiento_from_rules: sin fecha_emision_dt")
         return None
 
     base = fecha_emision_dt.astimezone(now_tz) if hasattr(fecha_emision_dt, "astimezone") else fecha_emision_dt
@@ -876,13 +839,11 @@ async def _calc_vencimiento_from_rules(
     usage = (usage_code or "").strip().upper() or None
 
     if not usage or not registration_year:
-        print(f"[CRT] _calc_vencimiento_from_rules: faltan datos => usage={usage} registration_year={registration_year}")
         return None
 
     rule = None
     try:
         if prov_code and loc_key:
-            print(f"[CRT] Localidad taller: provincia='{province_name}' ciudad='{city_name}' -> prov_code={prov_code} loc_key={loc_key} usage={usage}")
             async with get_conn_ctx() as conn:
                 rule = await conn.fetchrow(
                     """
@@ -901,19 +862,16 @@ async def _calc_vencimiento_from_rules(
                     usage,
                 )
         else:
-            print(f"[CRT] No se pudo mapear localidad del taller a códigos INDEC: provincia='{province_name}' ciudad='{city_name}'")
+            pass
     except Exception as e:
-        print(f"[CRT] Error consultando inspection_validity_rules: {e}")
         rule = None
 
     try:
         elapsed_months = (base.year - int(registration_year)) * 12
         elapsed_months = max(0, elapsed_months)
     except Exception:
-        print(f"[CRT] No se pudo calcular elapsed_months con registration_year={registration_year}")
         return None
     elapsed_years = elapsed_months // 12
-    print(f"[CRT] Antigüedad desde patentamiento: {elapsed_months} meses (~{elapsed_years} años). Asumiendo patentamiento en {base.month}/{registration_year}")
 
     default_up_to_36 = 36  
     default_from_3_to_7 = 24 
@@ -923,29 +881,23 @@ async def _calc_vencimiento_from_rules(
         up_to_36 = rule["up_to_36_months"]
         from_3_to_7 = rule["from_3_to_7_years"]
         over_7 = rule["over_7_years"]
-        print(f"[CRT] Regla encontrada para localidad_key={rule['localidad_key']} usage={rule['usage_code']}: up_to_36={up_to_36}m, 3_a_7={from_3_to_7}m, over_7={over_7}m")
     else:
         up_to_36 = default_up_to_36
         from_3_to_7 = default_from_3_to_7
         over_7 = default_over_7
-        print(f"[CRT] Sin regla para localidad/uso. Usando defaults: up_to_36={up_to_36}m, 3_a_7={from_3_to_7}m, over_7={over_7}m")
 
     if elapsed_months <= 36 and up_to_36:
         vto_dt = _add_months(base, int(up_to_36))
-        print(f"[CRT] Bucket ≤36 meses. Sumando {int(up_to_36)} meses. Vencimiento={vto_dt.date()}")
         return vto_dt
 
     if 3 <= elapsed_years <= 7 and from_3_to_7:
         vto_dt = _add_months(base, int(from_3_to_7))
-        print(f"[CRT] Bucket 3–7 años. Sumando {int(from_3_to_7)} meses. Vencimiento={vto_dt.date()}")
         return vto_dt
 
     if elapsed_years > 7 and over_7:
         vto_dt = _add_months(base, int(over_7))
-        print(f"[CRT] Bucket >7 años. Sumando {int(over_7)} meses. Vencimiento={vto_dt.date()}")
         return vto_dt
 
-    print("[CRT] Regla con valores nulos para bucket correspondiente; no se pudo calcular por reglas.")
     return None
 
 def _calc_vencimiento_fallback_dt(fecha_emision_dt: datetime | None, car_year: int | None, now_tz: pytz.BaseTzInfo) -> datetime | None:
@@ -1242,13 +1194,9 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         
         if needs_photo_template and photo_doc and photo_doc.get("file_url"):
             photo_url = photo_doc["file_url"]
-            print(f"[CRT] Foto encontrada, URL: {photo_url}")
             photo_task = _download_and_resize_image_async(photo_url, 246, 170)
         elif needs_photo_template:
-            if not insp:
-                print(f"[CRT] INFO: needs_photo_template=True pero no hay inspection")
-            elif not photo_doc:
-                print(f"[CRT] ADVERTENCIA: No se encontró foto de frente para inspection_id={insp.get('id')}")
+            pass
 
     # Optimización: descargar template y foto en paralelo
     try:
@@ -1264,14 +1212,9 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         if photo_task:
             photo_png_result = results[1]
             if isinstance(photo_png_result, Exception):
-                print(f"[CRT] ERROR descargando foto: {photo_png_result}")
                 photo_png = None
             else:
                 photo_png = photo_png_result
-                if photo_png:
-                    print(f"[CRT] Foto descargada y redimensionada correctamente, tamaño: {len(photo_png)} bytes")
-                else:
-                    print(f"[CRT] ERROR: No se pudo descargar/redimensionar la foto")
         else:
             photo_png = None
     except Exception as e:
@@ -1318,9 +1261,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         fecha_emision_dt = insp_created_at or row["app_date"]
     fecha_emision = _fmt_date(fecha_emision_dt) if fecha_emision_dt else ""
     
-    # Debug: verificar que fecha_emision tenga valor
-    if not fecha_emision:
-        print(f"[CRT] ADVERTENCIA: fecha_emision está vacío. insp_created_at={insp_created_at}, app_date={row.get('app_date')}, is_second_inspection={is_second_inspection}")
     fecha_vencimiento = None
     vto_dt_for_db = None
     if fecha_emision_dt:
@@ -1449,26 +1389,9 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     if needs_photo_template:
         mapping["${photo}"] = ""  
-        print(f"[CRT] Template con foto seleccionado. photo_png disponible: {photo_png is not None}")
-        if photo_png:
-            print(f"[CRT] Tamaño de photo_png: {len(photo_png)} bytes")
-    
-    # Debug: verificar valores problemáticos antes de renderizar
-    print(f"[CRT] Valores antes de renderizar:")
-    print(f"[CRT]   fecha_emision='{mapping.get('${fecha_emision}', 'NO_ENCONTRADO')}' (fecha_emision_dt={fecha_emision_dt})")
-    print(f"[CRT]   numero_motor='{mapping.get('${numero_motor}', 'NO_ENCONTRADO')}'")
-    print(f"[CRT]   numero_chasis='{mapping.get('${numero_chasis}', 'NO_ENCONTRADO')}'")
-    print(f"[CRT] Valores desde BD: engine_number={row.get('engine_number')}, chassis_number={row.get('chassis_number')}")
     
     try:
         pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png, usage_type)
-        print(f"[CRT] PDF renderizado exitosamente. Placeholders reemplazados: {counts}")
-        # Debug específico para placeholders problemáticos
-        for ph_check in ("${fecha_emision}", "${numero_motor}", "${numero_chasis}"):
-            if ph_check in counts:
-                print(f"[CRT] {ph_check} reemplazado {counts[ph_check]} vez(ces)")
-            else:
-                print(f"[CRT] ADVERTENCIA: {ph_check} NO fue reemplazado (no encontrado en PDF, valor en mapping='{mapping.get(ph_check, 'NO_ENCONTRADO')}')")
     except Exception as e:
         raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
 
@@ -1573,15 +1496,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 elif elapsed_years_dbg is not None and elapsed_years_dbg > 7:
                     bucket_dbg = "over_7_years"
 
-            print(
-                "[CRT][RESUMEN] "
-                f"Taller='{city_dbg}' ('{prov_dbg}') -> prov_code={prov_code_dbg} loc_key={loc_key_dbg}; "
-                f"rule_localidad_key_usada={used_lkey_dbg}; rule_usage_usado={used_usage_dbg}; "
-                f"usage={usage_dbg}; patentamiento={reg_year_dbg}-{reg_mon_dbg:02d}; "
-                f"antiguedad={elapsed_months_dbg}m (~{elapsed_years_dbg}a); "
-                f"meses_por_rango: up_to_36={up36_dbg}, 3_a_7={a3_7_dbg}, over_7={o7_dbg}; "
-                f"bucket_usado={bucket_dbg}; vto={fecha_vencimiento}"
-            )
         except Exception as e:
             print(f"[CRT][RESUMEN] Error generando resumen final: {e}")
 
