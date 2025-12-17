@@ -1,6 +1,7 @@
 
 from quart import Blueprint, jsonify
 from app.db import get_conn_ctx
+import datetime
 
 vehicles_bp = Blueprint("vehicles", __name__, url_prefix="/vehicles")
 
@@ -11,6 +12,11 @@ async def get_vehicle_data(license_plate: str):
     e incluye (si existe) la información COMPLETA del sticker vinculado bajo la
     clave 'sticker'.
     No incluye datos de owner/driver.
+    
+    Si el vehículo tiene revisiones (applications) con resultado 'Condicional'
+    dentro de los últimos 60 días que no han sido continuadas (solo tienen 1 inspección,
+    no 2), devuelve un error indicando que debe continuar el trámite en lugar de
+    devolver la información del vehículo.
     """
     async with get_conn_ctx() as conn:
         row = await conn.fetchrow(
@@ -63,6 +69,32 @@ async def get_vehicle_data(license_plate: str):
 
         if not row:
             return jsonify({"error": "Vehículo no encontrado"}), 404
+
+        # Verificar si tiene revisiones con resultado Condicional en los últimos 60 días
+        # que no hayan sido continuadas (solo 1 inspección, no 2)
+        car_id = row["id"]
+        sixty_days_ago = datetime.date.today() - datetime.timedelta(days=60)
+        
+        condicional_app = await conn.fetchrow(
+            """
+            SELECT a.id
+            FROM applications a
+            LEFT JOIN inspections i ON i.application_id = a.id
+            WHERE a.car_id = $1
+              AND a.result = 'Condicional'
+              AND a.date::date >= $2
+            GROUP BY a.id
+            HAVING COUNT(i.id) = 1
+            LIMIT 1
+            """,
+            car_id,
+            sixty_days_ago
+        )
+        
+        if condicional_app:
+            return jsonify({
+                "error": "El dominio presenta revisiones con resultado: 'Condicional', tiene que continuar el tramite"
+            }), 400
 
         car = {
             "id": row["id"],
