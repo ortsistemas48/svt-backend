@@ -1270,16 +1270,18 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         fecha_emision_dt = insp_created_at or row["app_date"]
     fecha_emision = _fmt_date(fecha_emision_dt) if fecha_emision_dt else ""
     
+    # Para calcular la fecha de vencimiento, siempre usar la fecha de la aplicación (app_date)
+    fecha_base_vencimiento_dt = row["app_date"]
     fecha_vencimiento = None
     vto_dt_for_db = None
-    if fecha_emision_dt:
+    if fecha_base_vencimiento_dt:
         if condicion == "Condicional":
-            vto_dt_for_db = fecha_emision_dt + timedelta(days=59)
+            vto_dt_for_db = fecha_base_vencimiento_dt + timedelta(days=59)
         elif condicion == "Rechazado":
             vto_dt_for_db = None
         else:
             vto_dt_for_db = await _calc_vencimiento_from_rules(
-                fecha_emision_dt=fecha_emision_dt,
+                fecha_emision_dt=fecha_base_vencimiento_dt,
                 province_name=row["workshop_province"],
                 city_name=row["workshop_city"],
                 usage_code=row["usage_type"],
@@ -1287,7 +1289,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 now_tz=argentina_tz,
             )
             if not vto_dt_for_db:
-                vto_dt_for_db = _calc_vencimiento_fallback_dt(fecha_emision_dt, row["car_year"], argentina_tz)
+                vto_dt_for_db = _calc_vencimiento_fallback_dt(fecha_base_vencimiento_dt, row["car_year"], argentina_tz)
         fecha_vencimiento = _fmt_date(vto_dt_for_db) if vto_dt_for_db else None
     email_owner = row["owner_email"]
     
