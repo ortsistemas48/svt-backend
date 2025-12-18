@@ -57,6 +57,14 @@ def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
         elif n <= 50: factor = 0.65
         else: factor = 0.55
         s *= factor
+    elif ph == "${nombre_apellido2}":
+        # Para nombre_apellido2, reducir tamaño si supera 40 caracteres
+        if n > 40:
+            if n <= 50: factor = 0.85
+            elif n <= 60: factor = 0.70
+            elif n <= 70: factor = 0.60
+            else: factor = 0.50
+            s *= factor
     if ph == "${numero_motor}":
         s *= 0.85
     if ph == "${numero_chasis}":
@@ -505,7 +513,8 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
         "${documento2}": 0.50,
         # "${localidad2}": 0.50,
         "${provincia2}": 0.50,
-        "${ced_tipo2}": 0.70,
+        "${ced_tipo2}": 0.50,
+        "${patente2}": 0.50,
         "${observaciones}": 0.1,
     }
 
@@ -518,7 +527,7 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
     ph_set = set(list(mapping.keys()) + ["${qr}", "${photo}"])
     has_photo_placeholder = "${photo}" in mapping
 
-    for page in doc:
+    for page_num, page in enumerate(doc):
         matches_map = _collect_all_placeholder_matches_with_style(page, ph_set)
         page_matches = {ph: matches_map.get(ph, []) for ph in mapping.keys() if matches_map.get(ph)}
         qr_matches = matches_map.get("${qr}", []) if qr_png is not None else []
@@ -1027,7 +1036,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     condicion_raw = (payload.get("condicion") or "Apto").strip().lower()
     cond_map = {"apto": "Apto", "condicional": "Condicional", "rechazado": "Rechazado"}
     condicion = cond_map.get(condicion_raw, "Apto")
-
+    
     templates_por_cond = {
         "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_apto.pdf",
         "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_condicional.pdf",
@@ -1349,6 +1358,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         except Exception:
             pass
 
+    dominio_value_for_mapping = row["car_plate"] or ""
+    
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
         "${fecha_vencimiento}":     fecha_vencimiento or "",
@@ -1365,7 +1376,8 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${localidad2}":            f"{localidad} ({provincia})" if localidad or provincia else "",
         "${provincia}":             provincia or "",
         "${provincia2}":            provincia or "",
-        "${dominio}":               row["car_plate"] or "",
+        "${patente}":               dominio_value_for_mapping,
+        "${patente2}":              dominio_value_for_mapping,
         "${anio}":                  str(row["car_registration_year"] or ""),
         "${marca}":                 row["car_brand"] or "",
         "${modelo}":                row["car_model"] or "",
