@@ -1242,7 +1242,7 @@ async def consume_slot(app_id: int):
             available = int(ws_row["available_inspections"] or 0)
             if available <= 0:
                 return jsonify({
-                    "error": "No hay inspecciones disponibles",
+                    "error": "No hay revisiones disponibles",
                     "workshop_id": ws_row["id"],
                     "available_inspections": available
                 }), 409
