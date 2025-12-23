@@ -1362,10 +1362,12 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
     dominio_value_for_mapping = row["car_plate"] or ""
     
+    fecha_em2 = _fmt_date(row["app_date"]) if row["app_date"] else ""
+    
     mapping = {
         "${fecha_emision}":         fecha_emision or "",
         "${fecha_vencimiento}":     fecha_vencimiento or "",
-        "${fecha_em2}":              fecha_emision or "",
+        "${fecha_em2}":              fecha_em2 or "",
         "${fecha_vto}":             fecha_vencimiento or "",
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
