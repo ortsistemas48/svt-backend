@@ -71,7 +71,8 @@ async def get_vehicle_data(license_plate: str):
             return jsonify({"error": "Vehículo no encontrado"}), 404
 
         # Verificar si tiene revisiones con resultado Condicional en los últimos 60 días
-        # que no hayan sido continuadas (solo 1 inspección, no 2)
+        # que no hayan sido continuadas (result_2 es NULL)
+        # Si result_2 existe, significa que ya se completó la segunda inspección y se puede crear una nueva
         car_id = row["id"]
         sixty_days_ago = datetime.date.today() - datetime.timedelta(days=60)
         
@@ -79,18 +80,16 @@ async def get_vehicle_data(license_plate: str):
             """
             SELECT a.id
             FROM applications a
-            LEFT JOIN inspections i ON i.application_id = a.id
             WHERE a.car_id = $1
               AND a.result = 'Condicional'
               AND a.date::date >= $2
-            GROUP BY a.id
-            HAVING COUNT(i.id) = 1
+              AND a.result_2 IS NULL
             LIMIT 1
             """,
             car_id,
             sixty_days_ago
         )
-        
+        print(condicional_app)
         if condicional_app:
             return jsonify({
                 "error": "El dominio presenta revisiones con resultado: 'Condicional', tiene que continuar el tramite"
