@@ -615,6 +615,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 c.license_plate ILIKE $2 OR
                 o.first_name     ILIKE $2 OR
                 o.last_name      ILIKE $2 OR
+                o.razon_social   ILIKE $2 OR
+                o.cuit           ILIKE $2 OR
                 o.dni::text      ILIKE $2
             )
         """)
@@ -916,6 +918,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 c.license_plate ILIKE ${param_count} OR
                 o.first_name     ILIKE ${param_count} OR
                 o.last_name      ILIKE ${param_count} OR
+                o.razon_social   ILIKE ${param_count} OR
+                o.cuit           ILIKE ${param_count} OR
                 o.dni::text      ILIKE ${param_count} OR
                 a.result         ILIKE ${param_count} OR
                 a.result_2       ILIKE ${param_count}
@@ -934,6 +938,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
         (
             ( NULLIF(trim(o.first_name), '') IS NOT NULL
               OR NULLIF(trim(o.last_name), '')  IS NOT NULL
+              OR o.razon_social IS NOT NULL
+              OR o.cuit IS NOT NULL
               OR o.dni IS NOT NULL )
         )
     """)
@@ -972,9 +978,13 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 o.first_name  AS owner_first_name,
                 o.last_name   AS owner_last_name,
                 o.dni         AS owner_dni,
+                o.razon_social AS owner_razon_social,
+                o.cuit         AS owner_cuit,
                 d.first_name  AS driver_first_name,
                 d.last_name   AS driver_last_name,
                 d.dni         AS driver_dni,
+                d.cuit        AS driver_cuit,
+                d.razon_social AS driver_razon_social,
                 c.license_plate,
                 c.brand,
                 c.model
@@ -1004,6 +1014,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                         "first_name": r["owner_first_name"],
                         "last_name":  r["owner_last_name"],
                         "dni":        r["owner_dni"],
+                        "cuit":       r["owner_cuit"],
+                        "razon_social": r["owner_razon_social"],
                     }
                     if (r["owner_first_name"] or r["owner_last_name"] or r["owner_dni"] is not None)
                     else None
@@ -1013,6 +1025,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                         "first_name": r["driver_first_name"],
                         "last_name":  r["driver_last_name"],
                         "dni":        r["driver_dni"],
+                        "cuit":       r["driver_cuit"],
+                        "razon_social": r["driver_razon_social"],
                     }
                     if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
                     else None
