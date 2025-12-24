@@ -667,16 +667,67 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 _TEMPLATE_CACHE: dict[str, tuple[float, bytes]] = {}
 _TEMPLATE_TTL_SECONDS = 3600  # Optimización: aumentar TTL a 1 hora (era 10 minutos)
 
-async def _get_template_bytes_async(template_url: str) -> bytes:
+async def _get_template_bytes_async(template_url: str, max_retries: int = 3) -> bytes:
+    """
+    Descarga el template PDF desde Supabase Storage con reintentos en caso de errores de conexión.
+    
+    Args:
+        template_url: URL del template a descargar
+        max_retries: Número máximo de reintentos (default: 3)
+    
+    Returns:
+        Bytes del template PDF
+    
+    Raises:
+        RuntimeError: Si no se pudo descargar después de todos los reintentos
+    """
     now = time.time()
     cached = _TEMPLATE_CACHE.get(template_url)
     if cached and (now - cached[0] < _TEMPLATE_TTL_SECONDS):
         return cached[1]
+    
     def _download() -> bytes:
-        # Optimización: usar stream=True y timeout más corto para descargas más rápidas
-        resp = requests.get(template_url, timeout=15, stream=True)
-        resp.raise_for_status()
-        return resp.content
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Usar stream=True para descargas grandes y leer por chunks
+                resp = requests.get(template_url, timeout=30, stream=True)
+                resp.raise_for_status()
+                
+                # Leer el contenido por chunks para manejar mejor conexiones interrumpidas
+                chunks = []
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        chunks.append(chunk)
+                
+                data = b''.join(chunks)
+                
+                if not data:
+                    raise RuntimeError("Template descargado está vacío")
+                
+                return data
+                
+            except Exception as e:
+                last_error = e
+                error_msg = str(e).lower()
+                error_type = type(e).__name__
+                
+                # Detectar errores de conexión que justifican reintento
+                is_connection_error = any(keyword in error_msg for keyword in [
+                    "connection", "timeout", "broken", "incomplete", "read", "eof",
+                    "ssl", "protocol", "socket", "errno", "closed", "reset", "interrupted"
+                ]) or "IncompleteRead" in error_type or "ConnectionError" in error_type or "Timeout" in error_type
+                
+                if is_connection_error and attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + 0.5  # Backoff exponencial: 1.5s, 2.5s, 4.5s
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise
+        
+        raise RuntimeError(f"No se pudo descargar el template después de {max_retries} intentos. Último error: {last_error}")
+    
     data = await asyncio.to_thread(_download)
     _TEMPLATE_CACHE[template_url] = (now, data)
     return data

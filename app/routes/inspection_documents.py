@@ -153,14 +153,25 @@ async def upload_inspection_documents(inspection_id: int):
         type_folder = f"{doc_type}/" if doc_type else ""
         dest = f"inspections/{inspection_id}/{subfolder}/{type_folder}{uuid.uuid4().hex}-{safe_name}"
 
-        client.storage.from_(BUCKET_INSPECTION_DOCS).upload(
-            path=dest,
-            file=data,
-            file_options={
-                "content_type": f.mimetype or "application/octet-stream",
-                "x-upsert": "true",
-            },
-        )
+        try:
+            client.storage.from_(BUCKET_INSPECTION_DOCS).upload(
+                path=dest,
+                file=data,
+                file_options={
+                    "content_type": f.mimetype or "application/octet-stream",
+                    "x-upsert": "true",
+                },
+            )
+        except Exception as e:
+            error_msg = str(e)
+            # Si el error contiene información sobre JSON, dar un mensaje más claro
+            if "JSONDecodeError" in error_msg or "Expecting value" in error_msg:
+                return jsonify({
+                    "error": f"No se pudo subir el archivo {f.filename}. Error de comunicación con el almacenamiento."
+                }), 502
+            return jsonify({
+                "error": f"No se pudo subir el archivo {f.filename}: {error_msg}"
+            }), 500
 
         file_url = _public_url(BUCKET_INSPECTION_DOCS, dest)
 
