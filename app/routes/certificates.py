@@ -1,5 +1,5 @@
 # app/routes/certificates.py
-from quart import Blueprint, request, jsonify
+from quart import Blueprint, request, jsonify, Response
 import os
 import io
 import fitz  # PyMuPDF
@@ -1052,13 +1052,38 @@ def _wrap_to_width(text: str, width: int = 35) -> str:
 @certificates_bp.route("/certificates/application/<int:app_id>/generate", methods=["POST"])
 async def certificates_generate_by_application(app_id: int):
     payload = await request.get_json() or {}
-    job_id = new_job()
-
-    async def work():
-        return await _do_generate_certificate(app_id, payload)
-
-    asyncio.create_task(run_job(work(), job_id))
-    return jsonify({"message": "En proceso", "job_id": job_id}), 202
+    
+    # Generar PDF inmediatamente
+    try:
+        pdf_bytes, file_name, metadata = await _generate_pdf_only(app_id, payload)
+        
+        # Programar subida a Supabase y actualizaciones de BD en segundo plano (sin bloquear la respuesta)
+        async def upload_and_update_background():
+            try:
+                storage_path = f"certificados/{app_id}/{file_name}"
+                public_url = await _upload_pdf_and_get_public_url_async(pdf_bytes, storage_path)
+                await _update_application_background(app_id, pdf_bytes, file_name, metadata, payload, public_url)
+            except Exception as e:
+                log.exception("Error en subida/actualización en segundo plano para aplicación %s: %s", app_id, e)
+        
+        asyncio.create_task(upload_and_update_background())
+        
+        # Debug: log del tamaño del PDF
+        log.info("Devolviendo PDF para aplicación %s, tamaño: %d bytes, nombre: %s", app_id, len(pdf_bytes), file_name)
+        
+        # Devolver PDF directamente para visualización/descarga inmediata
+        return Response(
+            pdf_bytes,
+            mimetype='application/pdf',
+            headers={
+                'Content-Disposition': f'inline; filename="{file_name}"',
+                'Content-Type': 'application/pdf',
+                'Content-Length': str(len(pdf_bytes))
+            }
+        )
+    except Exception as e:
+        log.exception("Error generando certificado para aplicación %s: %s", app_id, e)
+        return jsonify({"error": str(e)}), 500
 
 @certificates_bp.route("/certificates/job/<job_id>", methods=["GET"])
 async def certificates_job_status(job_id: str):
@@ -1067,7 +1092,472 @@ async def certificates_job_status(job_id: str):
         return jsonify({"error": "job_id no encontrado"}), 404
     return jsonify(j), 200
 
-# ---------- LÓGICA DE GENERACIÓN MOVIDA A FUNCIÓN REUTILIZABLE ----------
+# ---------- FUNCIÓN PARA GENERAR SOLO EL PDF (SIN SUBIR) ----------
+async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, dict]:
+    """
+    Genera solo el PDF del certificado sin subirlo ni actualizar la BD.
+    Retorna: (pdf_bytes, file_name, metadata)
+    """
+    condicion_raw = (payload.get("condicion") or "Apto").strip().lower()
+    cond_map = {"apto": "Apto", "condicional": "Condicional", "rechazado": "Rechazado"}
+    condicion = cond_map.get(condicion_raw, "Apto")
+    
+    templates_por_cond = {
+        "apto": "certificado_base_apto.pdf",
+        "condicional": "certificado_base_condicional.pdf",
+        "rechazado": "certificado_base_rechazado.pdf",
+    }
+    templates_por_cond_with_photo = {
+        "apto": "photos/certificado_base_apto_photo.pdf",
+        "condicional": "photos/certificado_base_condicional_photo.pdf",
+        "rechazado": "certificado_base_rechazado.pdf",
+    }
+    
+    usage_type = None
+    needs_photo_template = False
+    photo_png = None
+    template_url = None  
+    insp = None  
+    step_obs_rows = []
+    
+    async with get_conn_ctx() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+            a.id AS application_id,
+            a.date AS app_date,
+            a.status AS app_status,
+            a.result AS app_result,
+            a.workshop_id AS workshop_id,
+
+            o.first_name AS owner_first_name,
+            o.last_name  AS owner_last_name,
+            o.dni        AS owner_dni,
+            o.cuit       AS owner_cuit,
+            o.razon_social AS owner_razon_social,
+            o.street     AS owner_street,
+            o.city       AS owner_city,
+            o.province   AS owner_province,
+            o.email      AS owner_email,
+            d.first_name AS driver_first_name,
+            d.last_name  AS driver_last_name,
+            d.dni        AS driver_dni,
+            d.cuit       AS driver_cuit,
+
+            c.license_plate    AS car_plate,
+            c.brand            AS car_brand,
+            c.model            AS car_model,
+            c.manufacture_year AS car_year,
+            c.registration_year AS car_registration_year,
+            c.engine_brand     AS engine_brand,
+            c.engine_number    AS engine_number,
+            c.chassis_brand    AS chassis_brand,
+            c.chassis_number   AS chassis_number,
+            c.fuel_type        AS fuel_type,
+            c.insurance        AS insurance,
+            c.vehicle_type     AS vehicle_type,
+            c.usage_type       AS usage_type,
+            c.type_ced         AS car_type_ced,
+
+            ws.razon_social AS workshop_name,
+            ws.plant_number AS workshop_plant_number,
+            ws.province      AS workshop_province,
+            ws.city          AS workshop_city,
+
+            s.id AS sticker_id,
+            s.sticker_number AS sticker_number
+            FROM applications a
+            LEFT JOIN persons   o  ON o.id  = a.owner_id
+            LEFT JOIN persons   d  ON d.id  = a.driver_id
+            LEFT JOIN cars      c  ON c.id  = a.car_id
+            LEFT JOIN workshop  ws ON ws.id = a.workshop_id
+            LEFT JOIN stickers  s  ON s.id  = c.sticker_id
+            WHERE a.id = $1
+            """,
+            app_id
+        )
+        if not row:
+            raise RuntimeError("Trámite no encontrado")
+        
+        usage_type = (row.get("usage_type") or "").strip().upper()
+        needs_photo_template = (usage_type == "D" and condicion_raw in ("apto", "condicional"))
+        
+        if needs_photo_template:
+            template_url = templates_por_cond_with_photo.get(condicion_raw, templates_por_cond_with_photo["apto"])
+        else:
+            template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
+    
+        if not template_url:
+            template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
+
+        # Optimización: ejecutar consultas en paralelo cuando sea posible
+        insp = await conn.fetchrow(
+            """
+            SELECT
+                i.id,
+                i.global_observations,
+                i.created_at,
+                COALESCE(i.is_second, FALSE) AS is_second
+            FROM inspections i
+            WHERE i.application_id = $1
+            ORDER BY i.id DESC
+            LIMIT 1
+            """,
+            app_id
+        )
+
+        # Ejecutar consultas secuencialmente (asyncpg no permite paralelismo en la misma conexión)
+        step_obs_rows = []
+        photo_doc = None
+        
+        if insp:
+            step_obs_rows = await conn.fetch(
+                """
+                SELECT
+                  COALESCE(st.name, '')    AS step_name,
+                  o.description            AS obs_desc,
+                  COALESCE(so.number,999)  AS step_order,
+                  o.id                     AS obs_id
+                FROM observation_details od
+                JOIN inspection_details idet ON idet.id = od.inspection_detail_id
+                JOIN observations o          ON o.id    = od.observation_id
+                LEFT JOIN steps st           ON st.id   = o.step_id
+                LEFT JOIN steps_order so     ON so.step_id = st.id
+                                             AND so.workshop_id = $2
+                WHERE idet.inspection_id = $1
+                ORDER BY step_order, obs_id
+                """,
+                insp["id"],
+                row["workshop_id"],
+            )
+            
+            # Consulta de photo_doc si es necesario
+            if needs_photo_template and insp.get("id"):
+                photo_doc = await conn.fetchrow(
+                    """
+                    SELECT file_url
+                    FROM inspection_documents
+                    WHERE inspection_id = $1
+                      AND is_front = true
+                    LIMIT 1
+                    """,
+                    insp["id"]
+                )
+        
+        # Optimización: descargar template y foto en paralelo si es necesario
+        photo_task = None
+        
+        if needs_photo_template and photo_doc and photo_doc.get("file_url"):
+            photo_url = photo_doc["file_url"]
+            photo_task = _download_and_resize_image_async(photo_url, 246, 170)
+        elif needs_photo_template:
+            pass
+
+    # Optimización: cargar template y foto en paralelo
+    try:
+        tasks = [_get_template_bytes_async(template_url)]
+        if photo_task:
+            tasks.append(photo_task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        template_bytes = results[0]
+        if isinstance(template_bytes, Exception):
+            raise RuntimeError(f"No se pudo cargar el template, {template_bytes}")
+        
+        if photo_task:
+            photo_png_result = results[1]
+            if isinstance(photo_png_result, Exception):
+                photo_png = None
+            else:
+                photo_png = photo_png_result
+        else:
+            photo_png = None
+    except Exception as e:
+        raise RuntimeError(f"No se pudo cargar el template, {e}")
+
+    is_second_inspection = bool(insp and insp.get("is_second"))
+
+    base_owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
+
+    documento = None
+    documento_label = "D.N.I."
+    using_cuit = False
+    if row.get("owner_cuit"):
+        documento = row["owner_cuit"]
+        documento_label = "CUIT"
+        using_cuit = True
+    elif row.get("owner_dni"):
+        documento = row["owner_dni"]
+        documento_label = "D.N.I."
+        using_cuit = False
+    elif row.get("driver_dni"):
+        documento = row["driver_dni"]
+        documento_label = "D.N.I."
+        using_cuit = False
+    elif row.get("driver_cuit"):
+        documento = row["driver_cuit"]
+        documento_label = "CUIT"
+        using_cuit = True
+
+    if using_cuit and (row.get("owner_razon_social")):
+        owner_fullname = row["owner_razon_social"]
+    else:
+        owner_fullname = base_owner_fullname
+
+    domicilio = row["owner_street"]
+    localidad = row["owner_city"]
+    provincia = row["owner_province"]
+
+    argentina_tz = pytz.timezone("America/Argentina/Buenos_Aires")
+    insp_created_at = insp.get("created_at") if insp else None
+    if is_second_inspection and insp_created_at:
+        fecha_emision_dt = insp_created_at
+    else:
+        fecha_emision_dt = insp_created_at or row["app_date"]
+    fecha_emision = _fmt_date(fecha_emision_dt) if fecha_emision_dt else ""
+    
+    fecha_base_vencimiento_dt = row["app_date"]
+    fecha_vencimiento = None
+    vto_dt_for_db = None
+    if fecha_base_vencimiento_dt:
+        if condicion == "Condicional":
+            vto_dt_for_db = fecha_base_vencimiento_dt + timedelta(days=59)
+        elif condicion == "Rechazado":
+            vto_dt_for_db = None
+        else:
+            vto_dt_for_db = await _calc_vencimiento_from_rules(
+                fecha_emision_dt=fecha_base_vencimiento_dt,
+                province_name=row["workshop_province"],
+                city_name=row["workshop_city"],
+                usage_code=row["usage_type"],
+                registration_year=row["car_registration_year"],
+                now_tz=argentina_tz,
+            )
+            if not vto_dt_for_db:
+                vto_dt_for_db = _calc_vencimiento_fallback_dt(fecha_base_vencimiento_dt, row["car_year"], argentina_tz)
+        fecha_vencimiento = _fmt_date(vto_dt_for_db) if vto_dt_for_db else None
+    
+    resultado = condicion or (row["app_result"] or row["app_status"] or "Apto")
+    resultado_primera_inspeccion = (row["app_result"] or row["app_status"] or "").strip()
+    resultado_mapeo_principal = resultado if not is_second_inspection else (resultado_primera_inspeccion or resultado)
+    resultado_segunda_inspeccion = resultado if is_second_inspection else ""
+    tipo_puro = (row["vehicle_type"] or "").strip().upper()
+    tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
+    uso_display = _usage_type_display((row["usage_type"] or "").strip())
+    clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
+    clasificacion = _wrap_to_width(clasificacion_base, width=40)
+
+    resultado_final = resultado_mapeo_principal if not is_second_inspection else resultado_segunda_inspeccion
+    oblea = str(row["sticker_number"] or "")
+    current_year_ar = datetime.now(argentina_tz).year
+    crt_numero = f"{row['application_id']}"
+
+    step_groups = {}
+    for r in step_obs_rows or []:
+        step_name = (r["step_name"] or "").strip()
+        desc = (r["obs_desc"] or "").strip()
+        if not step_name and not desc:
+            continue
+        step_groups.setdefault(step_name, []).append(desc) if desc else step_groups.setdefault(step_name, [])
+
+    step_lines = []
+    seen = set()
+    for r in step_obs_rows or []:
+        name = (r["step_name"] or "").strip()
+        if name in seen:
+            continue
+        seen.add(name)
+        descs = [d for d in step_groups.get(name, []) if d]
+        if not name and not descs:
+            continue
+        if descs:
+            step_lines.append(f"{name}: {', '.join(descs)}" if name else ", ".join(descs))
+        else:
+            if name:
+                step_lines.append(f"{name}:")
+    step_obs_text = "\n".join(step_lines).strip()
+
+    global_obs_text = (insp["global_observations"] if insp and insp["global_observations"] else "").strip()
+    global_obs_wrapped = textwrap.fill(global_obs_text, width=115, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
+    obs2_width = 45 if (usage_type and usage_type.strip().upper() == "D") else 90
+    global_obs_wrapped2 = textwrap.fill(global_obs_text, width=obs2_width, break_long_words=False, break_on_hyphens=False) if global_obs_text else ""
+    observaciones_text = global_obs_wrapped
+    observaciones_text2 = global_obs_wrapped2
+
+    oblea = str(row["sticker_number"] or "").strip()
+    qr_target = oblea
+    qr_link = f"https://www.checkrto.com/qr/{qr_target}"
+    oblea_text = oblea if oblea else "Sin Asignar"
+
+    dominio_value_for_mapping = row["car_plate"] or ""
+    
+    fecha_em2 = _fmt_date(row["app_date"]) if row["app_date"] else ""
+    
+    mapping = {
+        "${fecha_emision}":         fecha_emision or "",
+        "${fecha_vencimiento}":     fecha_vencimiento or "",
+        "${fecha_em2}":              fecha_em2 or "",
+        "${fecha_vto}":             fecha_vencimiento or "",
+        "${taller}":                row["workshop_name"] or "",
+        "${num_reg}":               str(row["workshop_plant_number"] or ""),
+        "${nombre_apellido}":       owner_fullname or "",
+        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) - TITULAR" or "",
+        "${documento}":             str(documento or ""),
+        "${documento2}":            str(documento or ""),
+        "${domicilio}":             domicilio or "",
+        "${f_localidad}":           localidad or "",
+        "${t_localidad}":           row["workshop_city"] or "",
+        "${localidad2}":            f"{localidad} ({provincia})" if localidad or provincia else "",
+        "${provincia}":             provincia or "",
+        "${provincia2}":            provincia or "",
+        "${patente}":               dominio_value_for_mapping,
+        "${patente2}":              dominio_value_for_mapping,
+        "${anio}":                  str(row["car_registration_year"] or ""),
+        "${marca}":                 row["car_brand"] or "",
+        "${modelo}":                row["car_model"] or "",
+        "${marca_motor}":           row["engine_brand"] or "",
+        "${numero_motor}":          str(row["engine_number"] or ""),
+        "${combustible}":           row["fuel_type"] or "",
+        "${marca_chasis}":          row["chassis_brand"] or "",
+        "${numero_chasis}":         str(row["chassis_number"] or ""),
+        "${ced_tipo}":              str(row["car_type_ced"] or ""),
+        "${ced_tipo2}":             str(row["car_type_ced"] or ""),
+        "${tipo_vehiculo}":         tipo_puro,
+        "${resultado_inspeccion}":  resultado_mapeo_principal,
+        "${observaciones}":         observaciones_text,
+        "${observaciones2}":        observaciones_text2,
+        "${clasif}":                clasificacion,
+        "${resultado2}":            resultado_segunda_inspeccion,
+        "${crt_numero}":            crt_numero,
+        "${oblea_numero}":          oblea_text,
+        "${resultado_final}":       resultado_final,
+    }
+
+    if needs_photo_template:
+        mapping["${photo}"] = ""  
+    
+    try:
+        pdf_bytes, counts = await _render_certificate_pdf_async(template_bytes, mapping, qr_link, photo_png, usage_type)
+    except Exception as e:
+        raise RuntimeError(f"No se pudo renderizar el PDF, {e}")
+
+    file_name = "certificado_2.pdf" if is_second_inspection else "certificado.pdf"
+    
+    # Preparar metadata para la función de subida
+    metadata = {
+        "condicion": condicion,
+        "resultado": resultado,
+        "is_second_inspection": is_second_inspection,
+        "template_url": template_url,
+        "counts": counts,
+        "row": row,
+        "insp": insp,
+        "fecha_emision": fecha_emision,
+        "fecha_vencimiento": fecha_vencimiento,
+        "vto_dt_for_db": vto_dt_for_db if fecha_base_vencimiento_dt else None,
+        "owner_fullname": owner_fullname,
+        "oblea": oblea,
+        "crt_numero": crt_numero,
+        "resultado_final": resultado_final,
+        "email_owner": row["owner_email"],
+    }
+    
+    return pdf_bytes, file_name, metadata
+
+# ---------- FUNCIÓN PARA ACTUALIZAR EN SEGUNDO PLANO (PDF ya subido) ----------
+async def _update_application_background(app_id: int, pdf_bytes: bytes, file_name: str, metadata: dict, payload: dict, public_url: str):
+    """
+    Actualiza la aplicación en segundo plano (el PDF ya fue subido).
+    """
+
+    # Actualizar sticker si es rechazado
+    condicion = metadata["condicion"]
+    row = metadata["row"]
+    try:
+        async with get_conn_ctx() as conn:
+            if condicion == "Rechazado" and row.get("sticker_id"):
+                await conn.execute(
+                    "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                    row["sticker_id"]
+                )
+    except Exception as e:
+        log.exception("Error actualizando sticker para aplicación %s: %s", app_id, e)
+
+    # Actualizar inspección (created_at y expiration_date)
+    insp = metadata["insp"]
+    vto_dt_for_db = metadata.get("vto_dt_for_db")
+    try:
+        if insp and insp.get("id"):
+            async with get_conn_ctx() as conn:
+                await conn.execute(
+                    """
+                    UPDATE inspections
+                    SET created_at = NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires',
+                        expiration_date = $2
+                    WHERE id = $1
+                    """,
+                    insp["id"],
+                    vto_dt_for_db.date() if vto_dt_for_db else None,
+                )
+    except Exception as e:
+        log.exception("Error actualizando inspección para aplicación %s: %s", app_id, e)
+
+    # Actualizar aplicación
+    resultado = metadata["resultado"]
+    is_second_inspection = metadata["is_second_inspection"]
+    try:
+        async with get_conn_ctx() as conn:
+            if is_second_inspection:
+                await conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = $1,
+                        result_2 = $2
+                    WHERE id = $3
+                    """,
+                    "Completado",
+                    resultado,
+                    app_id,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = $1,
+                        result = $2
+                    WHERE id = $3
+                    """,
+                    "Completado",
+                    resultado,
+                    app_id,
+                )
+    except Exception as e:
+        log.exception("Error actualizando aplicación %s: %s", app_id, e)
+        raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
+
+    # Enviar email si hay email del owner
+    email_owner = metadata.get("email_owner")
+    if email_owner and email_owner.strip():
+        try:
+            await send_certificate_email(
+                to_email=email_owner.strip(),
+                pdf_bytes=pdf_bytes,
+                pdf_filename=file_name,
+                owner_name=metadata["owner_fullname"],
+                sticker_number=metadata["oblea"],
+                car_plate=row["car_plate"],
+                fecha_emision=metadata["fecha_emision"],
+                fecha_vencimiento=metadata["fecha_vencimiento"],
+                resultado=metadata["resultado_final"],
+                certificate_number=metadata["crt_numero"],
+                workshop_name=row["workshop_name"],
+            )
+            log.info("Certificado enviado por email a %s para aplicación %s", email_owner, app_id)
+        except Exception as e:
+            # No fallar la generación del certificado si falla el envío del email
+            log.exception("Error enviando certificado por email a %s para aplicación %s: %s", email_owner, app_id, e)
+
+# ---------- LÓGICA DE GENERACIÓN MOVIDA A FUNCIÓN REUTILIZABLE (MANTENER PARA COMPATIBILIDAD) ----------
 async def _do_generate_certificate(app_id: int, payload: dict):
     condicion_raw = (payload.get("condicion") or "Apto").strip().lower()
     cond_map = {"apto": "Apto", "condicional": "Condicional", "rechazado": "Rechazado"}
