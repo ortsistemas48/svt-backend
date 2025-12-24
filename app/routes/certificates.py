@@ -667,69 +667,54 @@ def _replace_placeholders_transparente(doc: fitz.Document, mapping: dict[str, st
 _TEMPLATE_CACHE: dict[str, tuple[float, bytes]] = {}
 _TEMPLATE_TTL_SECONDS = 3600  # Optimización: aumentar TTL a 1 hora (era 10 minutos)
 
-async def _get_template_bytes_async(template_url: str, max_retries: int = 3) -> bytes:
+async def _get_template_bytes_async(template_path: str, max_retries: int = 3) -> bytes:
     """
-    Descarga el template PDF desde Supabase Storage con reintentos en caso de errores de conexión.
+    Lee el template PDF desde archivos locales.
     
     Args:
-        template_url: URL del template a descargar
-        max_retries: Número máximo de reintentos (default: 3)
+        template_path: Ruta del archivo template (relativa a app/utils/templates o absoluta)
+        max_retries: Número máximo de reintentos (default: 3, no usado pero mantenido para compatibilidad)
     
     Returns:
         Bytes del template PDF
     
     Raises:
-        RuntimeError: Si no se pudo descargar después de todos los reintentos
+        RuntimeError: Si no se pudo leer el archivo
     """
     now = time.time()
-    cached = _TEMPLATE_CACHE.get(template_url)
+    cached = _TEMPLATE_CACHE.get(template_path)
     if cached and (now - cached[0] < _TEMPLATE_TTL_SECONDS):
         return cached[1]
     
-    def _download() -> bytes:
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                # Usar stream=True para descargas grandes y leer por chunks
-                resp = requests.get(template_url, timeout=30, stream=True)
-                resp.raise_for_status()
-                
-                # Leer el contenido por chunks para manejar mejor conexiones interrumpidas
-                chunks = []
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        chunks.append(chunk)
-                
-                data = b''.join(chunks)
-                
-                if not data:
-                    raise RuntimeError("Template descargado está vacío")
-                
-                return data
-                
-            except Exception as e:
-                last_error = e
-                error_msg = str(e).lower()
-                error_type = type(e).__name__
-                
-                # Detectar errores de conexión que justifican reintento
-                is_connection_error = any(keyword in error_msg for keyword in [
-                    "connection", "timeout", "broken", "incomplete", "read", "eof",
-                    "ssl", "protocol", "socket", "errno", "closed", "reset", "interrupted"
-                ]) or "IncompleteRead" in error_type or "ConnectionError" in error_type or "Timeout" in error_type
-                
-                if is_connection_error and attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + 0.5  # Backoff exponencial: 1.5s, 2.5s, 4.5s
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise
-        
-        raise RuntimeError(f"No se pudo descargar el template después de {max_retries} intentos. Último error: {last_error}")
+    def _read_file() -> bytes:
+        try:
+            # Si es una ruta relativa, construir la ruta completa desde app/utils/templates
+            if not os.path.isabs(template_path):
+                # Obtener el directorio base del proyecto (donde está app/)
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                full_path = os.path.join(base_dir, "app", "utils", "templates", template_path)
+            else:
+                full_path = template_path
+            
+            # Normalizar la ruta para evitar problemas con separadores
+            full_path = os.path.normpath(full_path)
+            
+            if not os.path.exists(full_path):
+                raise FileNotFoundError(f"Template no encontrado: {full_path}")
+            
+            with open(full_path, "rb") as f:
+                data = f.read()
+            
+            if not data:
+                raise RuntimeError("Template está vacío")
+            
+            return data
+            
+        except Exception as e:
+            raise RuntimeError(f"No se pudo leer el template desde {template_path}: {e}")
     
-    data = await asyncio.to_thread(_download)
-    _TEMPLATE_CACHE[template_url] = (now, data)
+    data = await asyncio.to_thread(_read_file)
+    _TEMPLATE_CACHE[template_path] = (now, data)
     return data
 
 def _render_certificate_pdf_sync(template_bytes: bytes, mapping: dict[str, str], qr_link: str, photo_png: bytes | None = None, usage_type: str | None = None) -> tuple[bytes, dict]:
@@ -1089,14 +1074,14 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     condicion = cond_map.get(condicion_raw, "Apto")
     
     templates_por_cond = {
-        "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_apto.pdf",
-        "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_condicional.pdf",
-        "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
+        "apto": "certificado_base_apto.pdf",
+        "condicional": "certificado_base_condicional.pdf",
+        "rechazado": "certificado_base_rechazado.pdf",
     }
     templates_por_cond_with_photo = {
-        "apto": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_apto_photo.pdf",
-        "condicional": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/crts-with-images/certificado_base_condicional_photo.pdf",
-        "rechazado": "https://uedevplogwlaueyuofft.supabase.co/storage/v1/object/public/certificados/certificado_base_rechazado.pdf",
+        "apto": "photos/certificado_base_apto_photo.pdf",
+        "condicional": "photos/certificado_base_condicional_photo.pdf",
+        "rechazado": "certificado_base_rechazado.pdf",
     }
     
     usage_type = None
@@ -1258,7 +1243,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         elif needs_photo_template:
             pass
 
-    # Optimización: descargar template y foto en paralelo
+    # Optimización: cargar template y foto en paralelo
     try:
         tasks = [_get_template_bytes_async(template_url)]
         if photo_task:
@@ -1278,7 +1263,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         else:
             photo_png = None
     except Exception as e:
-        raise RuntimeError(f"No se pudo descargar el template, {e}")
+        raise RuntimeError(f"No se pudo cargar el template, {e}")
 
     is_second_inspection = bool(insp and insp.get("is_second"))
 
