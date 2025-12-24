@@ -60,9 +60,9 @@ def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
     elif ph == "${nombre_apellido2}":
         # Para nombre_apellido2, reducir tamaño si supera 40 caracteres
         if n > 40:
-            if n <= 50: factor = 0.85
-            elif n <= 60: factor = 0.70
-            elif n <= 70: factor = 0.60
+            if n <= 50: factor = 0.95
+            elif n <= 60: factor = 0.80
+            elif n <= 70: factor = 0.70
             else: factor = 0.50
             s *= factor
     if ph == "${numero_motor}":
