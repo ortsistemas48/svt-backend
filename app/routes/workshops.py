@@ -1630,7 +1630,7 @@ async def update_workshop(workshop_id: int):
                 UPDATE workshop
                 SET {", ".join(sets)}, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ${idx}
-                RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number
+                RETURNING id, name, razon_social, province, city, phone, cuit, plant_number, disposition_number, available_inspections
                 """,
                 *vals, workshop_id
             )
