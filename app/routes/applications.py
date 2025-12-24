@@ -802,6 +802,38 @@ async def sendToSecondInspection(app_id):
         )
 
     return jsonify({"message": "Trámite enviado a la cola"}), 200
+
+@applications_bp.route("/<int:app_id>/revert-to-pending", methods=["POST"])
+async def revert_to_pending(app_id):
+    """
+    Cambia el estado de una aplicación de 'A Inspeccionar' a 'Pendiente'.
+    Solo funciona si el estado actual es 'A Inspeccionar'.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+    
+    async with get_conn_ctx() as conn:
+        application = await conn.fetchrow(
+            "SELECT id, status FROM applications WHERE id = $1",
+            app_id
+        )
+        if not application:
+            return jsonify({"error": "Trámite no encontrado"}), 404
+        
+        current_status = (application["status"] or "").strip()
+        if current_status != "A Inspeccionar":
+            return jsonify({
+                "error": f"No se puede revertir el estado. El estado actual es '{current_status}', debe ser 'A Inspeccionar'"
+            }), 400
+
+        await conn.execute(
+            "UPDATE applications SET status = $1 WHERE id = $2",
+            "Pendiente", app_id
+        )
+
+    return jsonify({"message": "Estado cambiado a 'Pendiente' exitosamente"}), 200
+
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
 async def list_completed_applications_by_workshop(workshop_id: int):
     """
