@@ -2075,26 +2075,31 @@ async def list_step_categories(workshop_id: int, step_id: int):
         
         step_name = step_row["name"]
         
-        # Obtener las categorías definidas en DEFAULT_TREE para este paso
+        # Obtener las categorías definidas en DEFAULT_TREE para este paso (para mantener orden)
         categories_for_step = DEFAULT_TREE.get(step_name, {})
         category_names_for_step = list(categories_for_step.keys()) if categories_for_step else []
         
-        if not category_names_for_step:
-            return jsonify([]), 200
-        
-        # Crear un diccionario para mantener el orden original
+        # Crear un diccionario para mantener el orden original del DEFAULT_TREE
         category_order = {name: idx for idx, name in enumerate(category_names_for_step)}
         
-        # Obtener todas las categorías del workshop que están en el DEFAULT_TREE para este paso
-        # y asegurar que tengan la subcategoría "General"
+        # Obtener categorías que:
+        # 1. Están en DEFAULT_TREE para este paso, O
+        # 2. Tienen observaciones (activas o inactivas) para este paso específico
+        #    (las inactivas pueden ser placeholders creados al asociar la categoría al paso)
         rows = await conn.fetch(
             """
-            SELECT oc.id AS category_id, oc.name AS category_name
+            SELECT DISTINCT oc.id AS category_id, oc.name AS category_name
             FROM observation_categories oc
+            LEFT JOIN observation_subcategories osc ON osc.category_id = oc.id AND osc.name = $4
+            LEFT JOIN observations o ON o.subcategory_id = osc.id AND o.step_id = $2
             WHERE oc.workshop_id = $1
-              AND oc.name = ANY($2::text[])
+              AND (
+                oc.name = ANY($3::text[])  -- Está en DEFAULT_TREE para este paso
+                OR o.id IS NOT NULL        -- Tiene observaciones (activas o placeholders) para este paso
+              )
+            ORDER BY oc.id
             """,
-            workshop_id, category_names_for_step
+            workshop_id, step_id, category_names_for_step if category_names_for_step else [], SUBCAT_NAME
         )
         
         # Para cada categoría que no tenga subcategoría "General", crearla
@@ -2115,9 +2120,12 @@ async def list_step_categories(workshop_id: int, step_id: int):
                     row["category_id"], SUBCAT_NAME
                 )
         
-        # Ordenar según el orden del DEFAULT_TREE
+        # Ordenar: primero las del DEFAULT_TREE (en su orden original), luego las demás (por ID)
         rows_list = list(rows)
-        rows_list.sort(key=lambda r: category_order.get(r["category_name"], 999))
+        rows_list.sort(key=lambda r: (
+            category_order.get(r["category_name"], 999999),  # Las del DEFAULT_TREE primero
+            r["category_id"]  # Luego por ID para mantener orden consistente
+        ))
 
     return jsonify([{"category_id": r["category_id"], "name": r["category_name"]} for r in rows_list]), 200
 
@@ -2168,6 +2176,33 @@ async def create_step_category(workshop_id: int, step_id: int):
                 """,
                 cat_row["id"], SUBCAT_NAME
             )
+            
+            # Crear una observación placeholder para asociar la categoría a este paso
+            # Esto permite que la categoría aparezca en el GET aunque aún no tenga observaciones reales
+            # Verificamos si ya existe una observación para esta combinación
+            existing_obs = await conn.fetchval(
+                """
+                SELECT id FROM observations
+                WHERE workshop_id = $1 AND step_id = $2 AND subcategory_id = $3
+                LIMIT 1
+                """,
+                workshop_id, step_id, subcat_row["id"]
+            )
+            
+            if not existing_obs:
+                # Crear observación placeholder invisible (is_active = FALSE)
+                # Esto asocia la categoría al paso sin mostrarla al usuario
+                await conn.execute(
+                    """
+                    INSERT INTO observations (workshop_id, step_id, subcategory_id, description, is_active)
+                    SELECT $1, $2, $3, '', FALSE
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM observations
+                        WHERE workshop_id = $1 AND step_id = $2 AND subcategory_id = $3
+                    )
+                    """,
+                    workshop_id, step_id, subcat_row["id"]
+                )
 
     return jsonify({"category_id": cat_row["id"], "name": cat_row["name"], "default_subcategory_id": subcat_row["id"]}), 201
 

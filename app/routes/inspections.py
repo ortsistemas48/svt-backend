@@ -685,30 +685,38 @@ async def list_step_categories(inspection_id: int, step_id: int):
         
         step_name = step_row["name"]
         
-        # Obtener las categorías definidas en DEFAULT_TREE para este paso
+        # Obtener las categorías definidas en DEFAULT_TREE para este paso (para mantener orden)
         categories_for_step = DEFAULT_TREE.get(step_name, {})
         category_names_for_step = list(categories_for_step.keys()) if categories_for_step else []
         
-        if not category_names_for_step:
-            return jsonify([]), 200
-        
-        # Crear un diccionario para mantener el orden original
+        # Crear un diccionario para mantener el orden original del DEFAULT_TREE
         category_order = {name: idx for idx, name in enumerate(category_names_for_step)}
         
-        # Obtener todas las categorías del workshop que están en el DEFAULT_TREE para este paso
+        # Obtener categorías que:
+        # 1. Están en DEFAULT_TREE para este paso, O
+        # 2. Tienen observaciones (activas o placeholders) para este paso específico
         rows = await conn.fetch(
             """
-            SELECT oc.id AS category_id, oc.name AS category_name
+            SELECT DISTINCT oc.id AS category_id, oc.name AS category_name
             FROM observation_categories oc
+            LEFT JOIN observation_subcategories osc ON osc.category_id = oc.id AND osc.name = $4
+            LEFT JOIN observations o ON o.subcategory_id = osc.id AND o.step_id = $2
             WHERE oc.workshop_id = $1
-              AND oc.name = ANY($2::text[])
+              AND (
+                oc.name = ANY($3::text[])  -- Está en DEFAULT_TREE para este paso
+                OR o.id IS NOT NULL        -- Tiene observaciones (activas o placeholders) para este paso
+              )
+            ORDER BY oc.id
             """,
-            ws_id, category_names_for_step
+            ws_id, step_id, category_names_for_step if category_names_for_step else [], SUBCAT_NAME
         )
         
-        # Ordenar según el orden del DEFAULT_TREE
+        # Ordenar: primero las del DEFAULT_TREE (en su orden original), luego las demás (por ID)
         rows_list = list(rows)
-        rows_list.sort(key=lambda r: category_order.get(r["category_name"], 999))
+        rows_list.sort(key=lambda r: (
+            category_order.get(r["category_name"], 999999),  # Las del DEFAULT_TREE primero
+            r["category_id"]  # Luego por ID para mantener orden consistente
+        ))
 
     out = [
         {
