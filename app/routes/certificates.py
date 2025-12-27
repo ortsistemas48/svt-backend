@@ -1443,68 +1443,7 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
 
     file_name = "certificado_2.pdf" if is_second_inspection else "certificado.pdf"
     
-    # Preparar metadata para la función de subida
-    metadata = {
-        "condicion": condicion,
-        "resultado": resultado,
-        "is_second_inspection": is_second_inspection,
-        "template_url": template_url,
-        "counts": counts,
-        "row": row,
-        "insp": insp,
-        "fecha_emision": fecha_emision,
-        "fecha_vencimiento": fecha_vencimiento,
-        "vto_dt_for_db": vto_dt_for_db if fecha_base_vencimiento_dt else None,
-        "owner_fullname": owner_fullname,
-        "oblea": oblea,
-        "crt_numero": crt_numero,
-        "resultado_final": resultado_final,
-        "email_owner": row["owner_email"],
-    }
-    
-    return pdf_bytes, file_name, metadata
-
-# ---------- FUNCIÓN PARA ACTUALIZAR EN SEGUNDO PLANO (PDF ya subido) ----------
-async def _update_application_background(app_id: int, pdf_bytes: bytes, file_name: str, metadata: dict, payload: dict, public_url: str):
-    """
-    Actualiza la aplicación en segundo plano (el PDF ya fue subido).
-    """
-
-    # Actualizar sticker si es rechazado
-    condicion = metadata["condicion"]
-    row = metadata["row"]
-    try:
-        async with get_conn_ctx() as conn:
-            if condicion == "Rechazado" and row.get("sticker_id"):
-                await conn.execute(
-                    "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                    row["sticker_id"]
-                )
-    except Exception as e:
-        log.exception("Error actualizando sticker para aplicación %s: %s", app_id, e)
-
-    # Actualizar inspección (created_at y expiration_date)
-    insp = metadata["insp"]
-    vto_dt_for_db = metadata.get("vto_dt_for_db")
-    try:
-        if insp and insp.get("id"):
-            async with get_conn_ctx() as conn:
-                await conn.execute(
-                    """
-                    UPDATE inspections
-                    SET created_at = NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires',
-                        expiration_date = $2
-                    WHERE id = $1
-                    """,
-                    insp["id"],
-                    vto_dt_for_db.date() if vto_dt_for_db else None,
-                )
-    except Exception as e:
-        log.exception("Error actualizando inspección para aplicación %s: %s", app_id, e)
-
-    # Actualizar aplicación
-    resultado = metadata["resultado"]
-    is_second_inspection = metadata["is_second_inspection"]
+    # Actualizar estado de la aplicación a "Completado" cuando se crea el PDF
     try:
         async with get_conn_ctx() as conn:
             if is_second_inspection:
@@ -1532,8 +1471,101 @@ async def _update_application_background(app_id: int, pdf_bytes: bytes, file_nam
                     app_id,
                 )
     except Exception as e:
-        log.exception("Error actualizando aplicación %s: %s", app_id, e)
+        log.exception("Error actualizando estado de aplicación %s: %s", app_id, e)
         raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
+    
+    # Preparar metadata para la función de subida
+    metadata = {
+        "condicion": condicion,
+        "resultado": resultado,
+        "is_second_inspection": is_second_inspection,
+        "template_url": template_url,
+        "counts": counts,
+        "row": row,
+        "insp": insp,
+        "fecha_emision": fecha_emision,
+        "fecha_vencimiento": fecha_vencimiento,
+        "vto_dt_for_db": vto_dt_for_db if fecha_base_vencimiento_dt else None,
+        "owner_fullname": owner_fullname,
+        "oblea": oblea,
+        "crt_numero": crt_numero,
+        "resultado_final": resultado_final,
+        "email_owner": row["owner_email"],
+    }
+    
+    return pdf_bytes, file_name, metadata
+
+# ---------- FUNCIÓN PARA ACTUALIZAR EN SEGUNDO PLANO (PDF ya subido) ----------
+async def _update_application_background(app_id: int, pdf_bytes: bytes, file_name: str, metadata: dict, payload: dict, public_url: str):
+    """
+    Actualiza la aplicación en segundo plano (el PDF ya fue subido).
+    """
+
+    # Actualizar sticker si es rechazado (solo si es la primera revisión del vehículo)
+    # Casos cubiertos:
+    # 1. Primera revisión da Rechazado → marca sticker como No Disponible
+    # 2. Primera revisión Condicional, segunda Rechazado → marca sticker como No Disponible
+    # 3. Si ya tiene revisiones previas completadas (Apto, Condicional, etc.) y luego da Rechazado → NO marca (se queda en uso)
+    # 4. Si ya había dado Rechazado antes → no modifica el sticker (ya debería estar No Disponible)
+    condicion = metadata["condicion"]
+    row = metadata["row"]
+    try:
+        async with get_conn_ctx() as conn:
+            # Verificar si es la primera revisión del vehículo cuando da rechazado
+            if condicion == "Rechazado" and row.get("sticker_id"):
+                # Obtener el car_id de la aplicación actual
+                car_id_result = await conn.fetchval(
+                    "SELECT car_id FROM applications WHERE id = $1",
+                    app_id
+                )
+                
+                if car_id_result:
+                    # Verificar si hay aplicaciones previas completadas para el mismo vehículo
+                    # Si hay aplicaciones previas completadas, el sticker ya estaba en uso, no se marca como No Disponible
+                    prev_completed_count = await conn.fetchval(
+                        """
+                        SELECT COUNT(*) 
+                        FROM applications 
+                        WHERE car_id = $1 
+                          AND status = 'Completado'
+                          AND id < $2
+                        """,
+                        car_id_result,
+                        app_id
+                    )
+                    
+                    # Solo actualizar sticker si es la primera revisión del vehículo (no hay aplicaciones previas completadas)
+                    # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
+                    # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
+                    if prev_completed_count == 0:
+                        await conn.execute(
+                            "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                            row["sticker_id"]
+                        )
+    except Exception as e:
+        log.exception("Error actualizando sticker para aplicación %s: %s", app_id, e)
+
+    # Actualizar inspección (created_at y expiration_date)
+    insp = metadata["insp"]
+    vto_dt_for_db = metadata.get("vto_dt_for_db")
+    try:
+        if insp and insp.get("id"):
+            async with get_conn_ctx() as conn:
+                await conn.execute(
+                    """
+                    UPDATE inspections
+                    SET created_at = NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires',
+                        expiration_date = $2
+                    WHERE id = $1
+                    """,
+                    insp["id"],
+                    vto_dt_for_db.date() if vto_dt_for_db else None,
+                )
+    except Exception as e:
+        log.exception("Error actualizando inspección para aplicación %s: %s", app_id, e)
+
+    # El estado de la aplicación ya se actualizó cuando se creó el PDF
+    # Aquí solo se actualizan otros datos (sticker, inspección, email)
 
     # Enviar email si hay email del owner
     email_owner = metadata.get("email_owner")
@@ -1651,13 +1683,6 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         if not template_url:
             template_url = templates_por_cond.get(condicion_raw, templates_por_cond["apto"])
 
-        # Optimización: actualizar sticker solo una vez si es necesario
-        if condicion == "Rechazado" and row.get("sticker_id"):
-            await conn.execute(
-                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                row["sticker_id"]
-            )
-        
         # Optimización: ejecutar consultas en paralelo cuando sea posible
         insp = await conn.fetchrow(
             """
@@ -1673,6 +1698,46 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             """,
             app_id
         )
+        
+        # Determinar si es segunda inspección antes de actualizar sticker
+        is_second_inspection = bool(insp and insp.get("is_second"))
+        
+        # Actualizar sticker solo si es la primera revisión del vehículo cuando da rechazado
+        # Casos cubiertos:
+        # 1. Primera revisión da Rechazado → marca sticker como No Disponible
+        # 2. Primera revisión Condicional, segunda Rechazado → marca sticker como No Disponible
+        # 3. Si ya tiene revisiones previas completadas (Apto, Condicional, etc.) y luego da Rechazado → NO marca (se queda en uso)
+        # 4. Si ya había dado Rechazado antes → no modifica el sticker (ya debería estar No Disponible)
+        if condicion == "Rechazado" and row.get("sticker_id"):
+            # Obtener el car_id de la aplicación actual
+            car_id_result = await conn.fetchval(
+                "SELECT car_id FROM applications WHERE id = $1",
+                app_id
+            )
+            
+            if car_id_result:
+                # Verificar si hay aplicaciones previas completadas para el mismo vehículo
+                # Si hay aplicaciones previas completadas, el sticker ya estaba en uso, no se marca como No Disponible
+                prev_completed_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) 
+                    FROM applications 
+                    WHERE car_id = $1 
+                      AND status = 'Completado'
+                      AND id < $2
+                    """,
+                    car_id_result,
+                    app_id
+                )
+                
+                # Solo actualizar sticker si es la primera revisión del vehículo (no hay aplicaciones previas completadas)
+                # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
+                # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
+                if prev_completed_count == 0:
+                    await conn.execute(
+                        "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                        row["sticker_id"]
+                    )
 
         # Actualizar created_at de la inspección a la fecha actual (zona horaria Argentina)
         if insp and insp.get("id"):
@@ -1755,7 +1820,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     except Exception as e:
         raise RuntimeError(f"No se pudo cargar el template, {e}")
 
-    is_second_inspection = bool(insp and insp.get("is_second"))
+    # is_second_inspection ya se determinó antes (después de obtener insp)
 
     base_owner_fullname = " ".join([x for x in [row["owner_first_name"], row["owner_last_name"]] if x])
 
