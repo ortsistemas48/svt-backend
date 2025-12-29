@@ -96,19 +96,27 @@ async def get_vehicle_data(license_plate: str):
             }), 400
 
         # Verificar si hay aplicaciones activas (En curso, Pendiente, A Inspeccionar) con la misma patente en el mismo taller
+        # Excluir la aplicación actual si se proporciona application_id
         workshop_id = request.args.get("workshop_id", type=int)
+        current_application_id = request.args.get("application_id", type=int)
         if workshop_id:
+            query_params = [car_id, workshop_id]
+            exclude_clause = ""
+            if current_application_id:
+                exclude_clause = "AND a.id != $3"
+                query_params.append(current_application_id)
+            
             active_app = await conn.fetchrow(
-                """
+                f"""
                 SELECT a.id
                 FROM applications a
                 WHERE a.car_id = $1
                   AND a.workshop_id = $2
                   AND a.status IN ('En curso', 'Pendiente', 'A Inspeccionar')
+                  {exclude_clause}
                 LIMIT 1
                 """,
-                car_id,
-                workshop_id
+                *query_params
             )
 
             if active_app:
