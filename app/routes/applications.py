@@ -684,6 +684,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 c.license_plate,
                 c.brand,
                 c.model,
+                s.sticker_number,
                 i1.created_at AS inspection_1_date,
                 i2.created_at AS inspection_2_date
             FROM applications a
@@ -691,6 +692,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             LEFT JOIN persons o ON a.owner_id = o.id
             LEFT JOIN persons d ON a.driver_id = d.id
             LEFT JOIN cars    c ON a.car_id   = c.id
+            LEFT JOIN stickers s ON c.sticker_id = s.id
             LEFT JOIN inspections i1 ON a.id = i1.application_id AND COALESCE(i1.is_second, FALSE) = FALSE
             LEFT JOIN inspections i2 ON a.id = i2.application_id AND COALESCE(i2.is_second, FALSE) = TRUE
             WHERE {where_sql}
@@ -745,6 +747,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 )
                 else None
             ),
+            "sticker_number": r["sticker_number"],
         })
 
     return jsonify({
