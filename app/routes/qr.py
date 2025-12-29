@@ -57,6 +57,7 @@ async def get_qr_data(sticker_number: str):
               SELECT a.id, a.date, a.status, a.result, a.result_2
               FROM applications a
               WHERE a.car_id = b.car_id
+              AND a.status = 'Completado'
               ORDER BY a.date DESC NULLS LAST, a.id DESC
               LIMIT 1
             ) la ON TRUE
