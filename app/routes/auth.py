@@ -225,6 +225,8 @@ async def register_bulk():
                 inviter_name = (" ".join([x for x in (fn, ln) if x])).strip() or None
 
         hashed_password = bcrypt.hash(password)
+        token = generate_email_token()
+        expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
 
         async with conn.transaction():
             user_row = await conn.fetchrow(
@@ -256,7 +258,23 @@ async def register_bulk():
                 workshop_id, user_id, user_type_id, engineer_kind
             )
 
+            await conn.execute(
+                """
+                INSERT INTO email_verification_tokens (user_id, token, expires_at)
+                VALUES ($1, $2, $3)
+                """,
+                user_id, token, expires_at
+            )
+
     full_name = f"{first_name} {last_name}".strip()
+
+    # 1) Email de verificación
+    try:
+        await send_verification_email(email, token)
+    except Exception as e:
+        log.exception("No se pudo enviar email de verificación a %s, error: %s", email, e)
+
+    # 2) Credenciales
     try:
         displayed_password = password if EMAIL_PLAIN_PASSWORDS else "definida por vos"
         login_url = f"{FRONTEND_URL}/login"
@@ -273,6 +291,7 @@ async def register_bulk():
     except Exception as e:
         log.exception("No se pudo enviar email de credenciales a %s, error: %s", email, e)
 
+    # 3) Asignación a taller
     try:
         workshop_url = f"{FRONTEND_URL}/dashboard/{workshop_id}"
         role_name = f"Ingeniero {engineer_kind}" if is_engineer else None
