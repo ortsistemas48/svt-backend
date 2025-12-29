@@ -92,7 +92,7 @@ async def get_vehicle_data(license_plate: str):
         print(condicional_app)
         if condicional_app:
             return jsonify({
-                "error": "El dominio presenta revisiones con resultado: 'Condicional', tiene que continuar el tramite"
+                "error": "El dominio presenta revisiones con resultado: 'Condicional', tiene que continuar la revisión."
             }), 400
 
         car = {
