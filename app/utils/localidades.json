@@ -103570,7 +103570,7 @@
       "fuente": "IGN",
       "provincia": {
         "id": "94",
-        "nombre": "Tierra del Fuego, Antártida e Islas del Atlántico Sur"
+        "nombre": "Tierra del Fuego"
       },
       "departamento": {
         "id": "94021",
@@ -104870,7 +104870,7 @@
       "fuente": "INDEC",
       "provincia": {
         "id": "94",
-        "nombre": "Tierra del Fuego, Antártida e Islas del Atlántico Sur"
+        "nombre": "Tierra del Fuego"
       },
       "departamento": {
         "id": "94008",
@@ -104896,7 +104896,7 @@
       "fuente": "INDEC",
       "provincia": {
         "id": "94",
-        "nombre": "Tierra del Fuego, Antártida e Islas del Atlántico Sur"
+        "nombre": "Tierra del Fuego"
       },
       "departamento": {
         "id": "94015",
@@ -104922,7 +104922,7 @@
       "fuente": "INDEC",
       "provincia": {
         "id": "94",
-        "nombre": "Tierra del Fuego, Antártida e Islas del Atlántico Sur"
+        "nombre": "Tierra del Fuego"
       },
       "departamento": {
         "id": "94015",
@@ -104940,6 +104940,32 @@
       "centroide": {
         "lon": -67.7629045285789,
         "lat": -54.6407832656577
+      }
+    },
+    {
+      "id": "94015030",
+      "nombre": "Tolhuin",
+      "fuente": "INDEC",
+      "provincia": {
+        "id": "94",
+        "nombre": "Tierra del Fuego"
+      },
+      "departamento": {
+        "id": "94015",
+        "nombre": "Ushuaia"
+      },
+      "municipio": {
+        "id": "940015",
+        "nombre": "Tolhuin"
+      },
+      "localidad_censal": {
+        "id": "94015030",
+        "nombre": "Tolhuin"
+      },
+      "categoria": "Localidad simple",
+      "centroide": {
+        "lon": -67.196944,
+        "lat": -54.509722
       }
     }
   ]
