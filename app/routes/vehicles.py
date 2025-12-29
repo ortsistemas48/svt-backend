@@ -2,7 +2,9 @@
 from quart import Blueprint, jsonify, request
 from app.db import get_conn_ctx
 import datetime
+import logging
 
+log = logging.getLogger(__name__)
 vehicles_bp = Blueprint("vehicles", __name__, url_prefix="/vehicles")
 
 @vehicles_bp.route("/get-vehicle-data/<string:license_plate>", methods=["GET"])
@@ -99,27 +101,45 @@ async def get_vehicle_data(license_plate: str):
         # Excluir la aplicación actual si se proporciona application_id
         workshop_id = request.args.get("workshop_id", type=int)
         current_application_id = request.args.get("application_id", type=int)
+        
+        log.debug(f"[get-vehicle-data] license_plate={license_plate}, car_id={car_id}, workshop_id={workshop_id}, current_application_id={current_application_id}")
+        
         if workshop_id:
-            query_params = [car_id, workshop_id]
-            exclude_clause = ""
             if current_application_id:
-                exclude_clause = "AND a.id != $3"
-                query_params.append(current_application_id)
-            
-            active_app = await conn.fetchrow(
-                f"""
-                SELECT a.id
-                FROM applications a
-                WHERE a.car_id = $1
-                  AND a.workshop_id = $2
-                  AND a.status IN ('En curso', 'Pendiente', 'A Inspeccionar')
-                  {exclude_clause}
-                LIMIT 1
-                """,
-                *query_params
-            )
+                # Excluir la aplicación actual
+                active_app = await conn.fetchrow(
+                    """
+                    SELECT a.id, a.status
+                    FROM applications a
+                    WHERE a.car_id = $1
+                      AND a.workshop_id = $2
+                      AND a.status IN ('En curso', 'Pendiente', 'A Inspeccionar')
+                      AND a.id != $3
+                    LIMIT 1
+                    """,
+                    car_id,
+                    workshop_id,
+                    current_application_id
+                )
+                log.debug(f"[get-vehicle-data] Query con exclusión de app_id={current_application_id}, resultado: {active_app}")
+            else:
+                # No excluir ninguna aplicación
+                active_app = await conn.fetchrow(
+                    """
+                    SELECT a.id, a.status
+                    FROM applications a
+                    WHERE a.car_id = $1
+                      AND a.workshop_id = $2
+                      AND a.status IN ('En curso', 'Pendiente', 'A Inspeccionar')
+                    LIMIT 1
+                    """,
+                    car_id,
+                    workshop_id
+                )
+                log.debug(f"[get-vehicle-data] Query sin exclusión, resultado: {active_app}")
 
             if active_app:
+                log.warning(f"[get-vehicle-data] Se encontró aplicación activa: id={active_app['id']}, status={active_app.get('status')}, car_id={car_id}, workshop_id={workshop_id}")
                 return jsonify({
                     "error": "Ya existe una revisión en curso, pendiente o a inspeccionar con esta patente en este taller."
                 }), 400
