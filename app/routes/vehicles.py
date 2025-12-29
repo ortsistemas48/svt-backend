@@ -1,5 +1,5 @@
 
-from quart import Blueprint, jsonify
+from quart import Blueprint, jsonify, request
 from app.db import get_conn_ctx
 import datetime
 
@@ -89,11 +89,32 @@ async def get_vehicle_data(license_plate: str):
             car_id,
             sixty_days_ago
         )
-        print(condicional_app)
+
         if condicional_app:
             return jsonify({
                 "error": "El dominio presenta revisiones con resultado: 'Condicional', tiene que continuar la revisión."
             }), 400
+
+        # Verificar si hay aplicaciones activas (En curso, Pendiente, A Inspeccionar) con la misma patente en el mismo taller
+        workshop_id = request.args.get("workshop_id", type=int)
+        if workshop_id:
+            active_app = await conn.fetchrow(
+                """
+                SELECT a.id
+                FROM applications a
+                WHERE a.car_id = $1
+                  AND a.workshop_id = $2
+                  AND a.status IN ('En curso', 'Pendiente', 'A Inspeccionar')
+                LIMIT 1
+                """,
+                car_id,
+                workshop_id
+            )
+
+            if active_app:
+                return jsonify({
+                    "error": "Ya existe una revisión en curso, pendiente o a inspeccionar con esta patente en este taller."
+                }), 400
 
         car = {
             "id": row["id"],
