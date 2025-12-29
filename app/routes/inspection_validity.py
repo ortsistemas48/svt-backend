@@ -208,25 +208,25 @@ async def bulk_apply_inspection_validity(province_code: str):
 
     async with get_conn_ctx() as conn:
         async with conn.transaction():
-            # Aplicamos a cada localidad y a los usage_codes seleccionados (o todos si no se especificaron)
-            for lk in loc_keys:
-                for usage_code in codes_to_apply:
-                    # Insertamos valores (pueden venir NULL si no se proveen) y en conflicto actualizamos sólo los campos presentes
-                    await conn.execute(
-                        f"""
-                        INSERT INTO inspection_validity_rules (
-                            province_code, localidad_key, usage_code,
-                            up_to_36_months, from_3_to_7_years, over_7_years,
-                            updated_by_user_id
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7::uuid)
-                        ON CONFLICT (province_code, localidad_key, usage_code)
-                        DO UPDATE SET
-                            up_to_36_months   = COALESCE(EXCLUDED.up_to_36_months, inspection_validity_rules.up_to_36_months),
-                            from_3_to_7_years = COALESCE(EXCLUDED.from_3_to_7_years, inspection_validity_rules.from_3_to_7_years),
-                            over_7_years      = COALESCE(EXCLUDED.over_7_years,      inspection_validity_rules.over_7_years),
-                            updated_by_user_id = EXCLUDED.updated_by_user_id,
-                            updated_at         = NOW()
-                        """,
+            # Optimización: procesar en lotes para evitar que la transacción se quede trabada
+            # Usamos lotes de 100 registros para balancear rendimiento y uso de memoria
+            BATCH_SIZE = 100
+            all_pairs = [(lk, uc) for lk in loc_keys for uc in codes_to_apply]
+            
+            for batch_start in range(0, len(all_pairs), BATCH_SIZE):
+                batch = all_pairs[batch_start:batch_start + BATCH_SIZE]
+                
+                # Construir query con múltiples VALUES para inserción masiva
+                # Esto es mucho más eficiente que ejecutar una query por cada combinación
+                values_list = []
+                params_list = []
+                param_num = 1
+                
+                for lk, usage_code in batch:
+                    values_list.append(
+                        f"(${param_num}, ${param_num+1}, ${param_num+2}, ${param_num+3}, ${param_num+4}, ${param_num+5}, ${param_num+6}::uuid)"
+                    )
+                    params_list.extend([
                         province_code,
                         lk,
                         usage_code,
@@ -234,7 +234,28 @@ async def bulk_apply_inspection_validity(province_code: str):
                         a3_7_v if apply_a3_7 else None,
                         o7_v if apply_o7 else None,
                         user_id,
-                    )
+                    ])
+                    param_num += 7
+                
+                values_clause = ", ".join(values_list)
+                
+                await conn.execute(
+                    f"""
+                    INSERT INTO inspection_validity_rules (
+                        province_code, localidad_key, usage_code,
+                        up_to_36_months, from_3_to_7_years, over_7_years,
+                        updated_by_user_id
+                    ) VALUES {values_clause}
+                    ON CONFLICT (province_code, localidad_key, usage_code)
+                    DO UPDATE SET
+                        up_to_36_months   = COALESCE(EXCLUDED.up_to_36_months, inspection_validity_rules.up_to_36_months),
+                        from_3_to_7_years = COALESCE(EXCLUDED.from_3_to_7_years, inspection_validity_rules.from_3_to_7_years),
+                        over_7_years      = COALESCE(EXCLUDED.over_7_years,      inspection_validity_rules.over_7_years),
+                        updated_by_user_id = EXCLUDED.updated_by_user_id,
+                        updated_at         = NOW()
+                    """,
+                    *params_list,
+                )
 
     return jsonify({"message": f"Aplicado a {len(loc_keys)} localidad(es)"}), 200
 
