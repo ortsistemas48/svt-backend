@@ -497,9 +497,14 @@ async def login():
     if not identifier or not password:
         return jsonify({"error": "Email o DNI y contraseña requeridos"}), 400
 
+    # Normalizar el identificador a minúsculas si parece ser un email (contiene @)
+    # Para DNI se mantiene como viene
+    normalized_identifier = identifier.strip().lower() if "@" in identifier else identifier.strip()
+
     async with get_conn_ctx() as conn:
+        # Comparación case-insensitive para email, directa para DNI
         user = await conn.fetchrow(
-            "SELECT * FROM users WHERE email = $1 OR dni = $1", identifier
+            "SELECT * FROM users WHERE LOWER(email) = $1 OR dni = $1", normalized_identifier
         )
 
     if not user or not bcrypt.verify(password, user["password"]):
