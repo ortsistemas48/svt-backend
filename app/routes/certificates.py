@@ -844,6 +844,26 @@ def _add_months(base_dt: datetime, months: int) -> datetime:
     except ValueError:
         return base_dt + timedelta(days=30 * months)
 
+def _months_since_registration_year(base_dt: datetime, registration_year: int) -> int:
+    """Calcula la cantidad de meses desde enero del año de patentamiento hasta la fecha base."""
+    try:
+        # Crear fecha de referencia: 1 de enero del año de patentamiento
+        if hasattr(base_dt, 'tzinfo') and base_dt.tzinfo is not None:
+            registration_start = datetime(registration_year, 1, 1, tzinfo=base_dt.tzinfo)
+        else:
+            registration_start = datetime(registration_year, 1, 1)
+        
+        # Calcular diferencia en años y meses
+        years_diff = base_dt.year - registration_start.year
+        months_diff = base_dt.month - registration_start.month
+        
+        # Total de meses transcurridos
+        total_months = years_diff * 12 + months_diff
+        
+        return max(0, total_months)
+    except Exception:
+        return 0
+
 def _parse_spanish_month(value) -> int | None:
     if value is None:
         return None
@@ -912,8 +932,7 @@ async def _calc_vencimiento_from_rules(
         rule = None
 
     try:
-        elapsed_months = (base.year - int(registration_year)) * 12
-        elapsed_months = max(0, elapsed_months)
+        elapsed_months = _months_since_registration_year(base, int(registration_year))
     except Exception:
         return None
     elapsed_years = elapsed_months // 12
@@ -931,7 +950,7 @@ async def _calc_vencimiento_from_rules(
         from_3_to_7 = default_from_3_to_7
         over_7 = default_over_7
 
-    if elapsed_months <= 36 and up_to_36:
+    if elapsed_months <= 35 and up_to_36:
         vto_dt = _add_months(base, int(up_to_36))
         return vto_dt
 
@@ -2055,8 +2074,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             elapsed_years_dbg = None
             try:
                 if reg_year_dbg:
-                    elapsed_months_dbg = (base_dbg.year - int(reg_year_dbg)) * 12
-                    elapsed_months_dbg = max(0, elapsed_months_dbg)
+                    elapsed_months_dbg = _months_since_registration_year(base_dbg, int(reg_year_dbg))
                     elapsed_years_dbg = elapsed_months_dbg // 12
                     reg_mon_dbg = base_dbg.month
             except Exception:
@@ -2097,7 +2115,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
 
             bucket_dbg = None
             if elapsed_months_dbg is not None:
-                if elapsed_months_dbg <= 36:
+                if elapsed_months_dbg <= 35:
                     bucket_dbg = "up_to_36"
                 elif elapsed_years_dbg is not None and 3 <= elapsed_years_dbg <= 7:
                     bucket_dbg = "3_to_7_years"
