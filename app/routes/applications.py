@@ -617,7 +617,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 o.last_name      ILIKE $2 OR
                 o.razon_social   ILIKE $2 OR
                 o.cuit           ILIKE $2 OR
-                o.dni::text      ILIKE $2
+                o.dni::text      ILIKE $2 OR
+                s.sticker_number ILIKE $2
             )
         """)
         params.append(f"%{q}%")
@@ -654,10 +655,11 @@ async def list_full_applications_by_workshop(workshop_id: int):
             FROM applications a
             LEFT JOIN persons o ON a.owner_id = o.id
             LEFT JOIN cars    c ON a.car_id   = c.id
+            LEFT JOIN stickers s ON c.sticker_id = s.id
             WHERE {where_sql}
             """,
             *params
-        )
+        )   
 
         limit_idx  = len(params) + 1
         offset_idx = len(params) + 2
@@ -685,6 +687,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 c.brand,
                 c.model,
                 s.sticker_number,
+                s.status AS sticker_status,
                 i1.created_at AS inspection_1_date,
                 i2.created_at AS inspection_2_date
             FROM applications a
@@ -806,11 +809,11 @@ async def sendToSecondInspection(app_id):
 
     return jsonify({"message": "Trámite enviado a la cola"}), 200
 
-@applications_bp.route("/<int:app_id>/revert-to-pending", methods=["POST"])
-async def revert_to_pending(app_id):
+@applications_bp.route("/<int:app_id>/revert-to-completed", methods=["POST"])
+async def revert_to_completed(app_id):
     """
-    Cambia el estado de una aplicación de 'A Inspeccionar' a 'Pendiente'.
-    Solo funciona si el estado actual es 'A Inspeccionar'.
+    Cambia el estado de una aplicación de 'Segunda Inspección' a 'Completado'.
+    Solo funciona si el estado actual es 'Segunda Inspección'.
     """
     user_id = g.get("user_id")
     if not user_id:
@@ -825,17 +828,17 @@ async def revert_to_pending(app_id):
             return jsonify({"error": "Trámite no encontrado"}), 404
         
         current_status = (application["status"] or "").strip()
-        if current_status != "A Inspeccionar":
+        if current_status != "Segunda Inspección":
             return jsonify({
-                "error": f"No se puede revertir el estado. El estado actual es '{current_status}', debe ser 'A Inspeccionar'"
+                "error": f"No se puede revertir el estado. El estado actual es '{current_status}', debe ser 'Segunda Inspección'"
             }), 400
 
         await conn.execute(
             "UPDATE applications SET status = $1 WHERE id = $2",
-            "Pendiente", app_id
+            "Completado", app_id
         )
 
-    return jsonify({"message": "Estado cambiado a 'Pendiente' exitosamente"}), 200
+    return jsonify({"message": "Estado cambiado a 'Completado' exitosamente"}), 200
 
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
 async def list_completed_applications_by_workshop(workshop_id: int):
@@ -957,7 +960,8 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 o.cuit           ILIKE ${param_count} OR
                 o.dni::text      ILIKE ${param_count} OR
                 a.result         ILIKE ${param_count} OR
-                a.result_2       ILIKE ${param_count}
+                a.result_2       ILIKE ${param_count} OR
+                s.sticker_number ILIKE ${param_count}
             )
         """)
         params.append(f"%{q}%")
@@ -989,6 +993,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
             FROM applications a
             LEFT JOIN persons o ON a.owner_id = o.id
             LEFT JOIN cars    c ON a.car_id   = c.id
+            LEFT JOIN stickers s ON c.sticker_id = s.id
             WHERE {where_sql}
             """,
             *params
@@ -1020,6 +1025,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 d.dni         AS driver_dni,
                 d.cuit        AS driver_cuit,
                 d.razon_social AS driver_razon_social,
+                s.sticker_number AS sticker_number,
                 c.license_plate,
                 c.brand,
                 c.model
@@ -1027,6 +1033,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
             LEFT JOIN persons o ON a.owner_id = o.id
             LEFT JOIN persons d ON a.driver_id = d.id
             LEFT JOIN cars    c ON a.car_id   = c.id
+            LEFT JOIN stickers s ON c.sticker_id = s.id
             WHERE {where_sql}
             ORDER BY a.date DESC NULLS LAST
             LIMIT ${limit_idx} OFFSET ${offset_idx}
@@ -1044,6 +1051,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 "status": r["status"],
                 "result": r.get("result"),
                 "result_2": r.get("result_2"),
+                "sticker_number": r["sticker_number"],
                 "owner": (
                     {
                         "first_name": r["owner_first_name"],
