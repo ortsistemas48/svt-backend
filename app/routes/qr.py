@@ -51,7 +51,9 @@ async def get_qr_data(sticker_number: str):
               li.inspection_id,
               li.expiration_date AS expiration_date,
               li.inspection_created_at,
-              li.is_second AS is_second_inspection
+              li.is_second AS is_second_inspection,
+              li_first.first_inspection_id,
+              li_second.second_inspection_id
             FROM base b
             LEFT JOIN LATERAL (
               SELECT a.id, a.date, a.status, a.result, a.result_2
@@ -66,10 +68,30 @@ async def get_qr_data(sticker_number: str):
               FROM inspections i
               WHERE i.application_id = la.id
               ORDER BY 
-                CASE WHEN COALESCE(i.is_second, FALSE) = TRUE THEN 0 ELSE 1 END,
+                CASE 
+                  WHEN la.result_2 IS NOT NULL AND COALESCE(i.is_second, FALSE) = TRUE THEN 0
+                  WHEN la.result_2 IS NULL AND COALESCE(i.is_second, FALSE) = FALSE THEN 0
+                  ELSE 1
+                END,
                 i.id DESC
               LIMIT 1
             ) li ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT i.id AS first_inspection_id
+              FROM inspections i
+              WHERE i.application_id = la.id
+                AND COALESCE(i.is_second, FALSE) = FALSE
+              ORDER BY i.id ASC
+              LIMIT 1
+            ) li_first ON TRUE
+            LEFT JOIN LATERAL (
+              SELECT i.id AS second_inspection_id
+              FROM inspections i
+              WHERE i.application_id = la.id
+                AND COALESCE(i.is_second, FALSE) = TRUE
+              ORDER BY i.id ASC
+              LIMIT 1
+            ) li_second ON TRUE
             """,
             sticker_number
         )
@@ -96,10 +118,19 @@ async def get_qr_data(sticker_number: str):
         if inspection_created_at is not None and hasattr(inspection_created_at, "isoformat"):
             inspection_created_at = inspection_created_at.isoformat()
         
-        # Si estamos mostrando la segunda inspección, usar result_2; si no, usar result (primera inspección)
-        is_second = bool(row.get("is_second_inspection"))
-        print
-        inspection_result = row.get("application_result_2") if is_second else row.get("application_result")
+        # Si result_2 existe (no es null), usar ese resultado como referencia; si no, usar result
+        inspection_result = row.get("application_result_2") if row.get("application_result_2") is not None else row.get("application_result")
+        
+        # Obtener IDs de ambas inspecciones para las fotos
+        first_inspection_id = row.get("first_inspection_id")
+        second_inspection_id = row.get("second_inspection_id")
+        
+        # Crear lista de IDs de inspecciones para fotos (primera y segunda si existen)
+        photos_inspection_ids = []
+        if first_inspection_id:
+            photos_inspection_ids.append(first_inspection_id)
+        if second_inspection_id:
+            photos_inspection_ids.append(second_inspection_id)
         
         inspection = {
             "id": row.get("inspection_id"),
@@ -109,6 +140,11 @@ async def get_qr_data(sticker_number: str):
             "result": inspection_result,
             "expiration_date": exp,
             "created_at": inspection_created_at,
+            "is_second": bool(row.get("is_second_inspection")),
+            "has_result_2": row.get("application_result_2") is not None,
+            "photos_inspection_ids": photos_inspection_ids,
+            "first_inspection_id": first_inspection_id,
+            "second_inspection_id": second_inspection_id,
         }
 
     return jsonify({
