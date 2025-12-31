@@ -840,6 +840,109 @@ async def revert_to_completed(app_id):
 
     return jsonify({"message": "Estado cambiado a 'Completado' exitosamente"}), 200
 
+@applications_bp.route("/<int:app_id>/report-abandonment", methods=["POST"])
+async def report_abandonment(app_id):
+    """
+    Cambia el estado de una aplicación de 'Pendiente' a 'Abandonado'.
+    Si es la primera revisión del vehículo, desasigna la oblea y la marca como Disponible.
+    Si no es la primera, desasigna la oblea y la marca como No Disponible.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+    
+    async with get_conn_ctx() as conn:
+        async with conn.transaction():
+            # Obtener la aplicación con FOR UPDATE
+            application = await conn.fetchrow(
+                """
+                SELECT id, status, car_id
+                FROM applications
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                app_id
+            )
+            if not application:
+                return jsonify({"error": "Trámite no encontrado"}), 404
+            
+            current_status = (application["status"] or "").strip()
+            if current_status != "Pendiente":
+                return jsonify({
+                    "error": f"No se puede reportar abandono. El estado actual es '{current_status}', debe ser 'Pendiente'"
+                }), 400
+            
+            car_id = application["car_id"]
+            
+            if not car_id:
+                return jsonify({"error": "La aplicación no tiene vehículo asociado"}), 400
+            
+            # Obtener datos del vehículo
+            car_data = await conn.fetchrow(
+                """
+                SELECT license_plate, sticker_id
+                FROM cars
+                WHERE id = $1
+                """,
+                car_id
+            )
+            
+            if not car_data:
+                return jsonify({"error": "Vehículo no encontrado"}), 404
+            
+            license_plate = car_data["license_plate"]
+            sticker_id = car_data["sticker_id"]
+            
+            if not license_plate:
+                return jsonify({"error": "El vehículo no tiene patente asociada"}), 400
+            
+            # Verificar si es la primera aplicación para este vehículo
+            # Contar aplicaciones con el mismo car_id, excluyendo la actual
+            other_apps_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM applications
+                WHERE car_id = $1 
+                AND id != $2
+                AND is_deleted IS NOT TRUE
+                """,
+                car_id, app_id
+            )
+            
+            is_first_application = (other_apps_count or 0) == 0
+            
+            # Cambiar estado a Abandonado
+            await conn.execute(
+                "UPDATE applications SET status = $1 WHERE id = $2",
+                "Abandonado", app_id
+            )
+            
+            # Si hay sticker asignado, desasignarlo y actualizar su estado
+            if sticker_id:
+                # Desasignar el sticker del vehículo
+                await conn.execute(
+                    "UPDATE cars SET sticker_id = NULL WHERE id = $1",
+                    car_id
+                )
+                
+                # Actualizar estado del sticker según si es primera aplicación o no
+                if is_first_application:
+                    await conn.execute(
+                        "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                        sticker_id
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                        sticker_id
+                    )
+    
+    return jsonify({
+        "message": "Abandono reportado exitosamente",
+        "is_first_application": is_first_application,
+        "sticker_unassigned": sticker_id is not None
+    }), 200
+
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
 async def list_completed_applications_by_workshop(workshop_id: int):
     """
