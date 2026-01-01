@@ -73,8 +73,8 @@ async def create_order():
 
     if not workshop_id:
         return jsonify({"error": "workshop_id requerido"}), 400
-    if quantity < 250 or quantity % 250 != 0:
-        return jsonify({"error": "La cantidad mínima es 250 y múltiplo de 250"}), 400
+    if quantity < 250:
+        return jsonify({"error": "La cantidad mínima es 250"}), 400
     if zone not in ("SUR", "CENTRO", "NORTE"):
         return jsonify({"error": "Zona inválida"}), 400
     if unit_price <= 0 or amount <= 0:
