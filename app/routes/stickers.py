@@ -272,6 +272,7 @@ async def mark_sticker_as_used(sticker_id: int):
 async def get_stickers_by_workshop(workshop_id: int):
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
+    q = (request.args.get("q") or "").strip()
     
     if page < 1:
         page = 1
@@ -283,37 +284,85 @@ async def get_stickers_by_workshop(workshop_id: int):
     offset = (page - 1) * per_page
 
     async with get_conn_ctx() as conn:
-        total_count = await conn.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM stickers s
-            JOIN sticker_orders so ON so.id = s.sticker_order_id
-            WHERE so.workshop_id = $1
-            """,
-            workshop_id,
-        )
-        
-        rows = await conn.fetch(
-            """
-            SELECT
-              s.id,
-              s.sticker_number,
-              s.expiration_date,
-              s.issued_at,
-              s.status,
-              s.sticker_order_id,
-              so.name as order_name,
-              so.workshop_id,
-              c.license_plate
-            FROM stickers s
-            JOIN sticker_orders so ON so.id = s.sticker_order_id
-            LEFT JOIN cars c ON c.sticker_id = s.id
-            WHERE so.workshop_id = $1
-            ORDER BY s.id DESC
-            LIMIT $2 OFFSET $3
-            """,
-            workshop_id, per_page, offset,
-        )
+        # Build search condition
+        if q:
+            search_pattern = f"%{q}%"
+            total_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c ON c.sticker_id = s.id
+                WHERE so.workshop_id = $1
+                  AND (
+                    s.sticker_number ILIKE $2 OR
+                    c.license_plate ILIKE $2 OR
+                    so.name ILIKE $2 OR
+                    CAST(s.id AS TEXT) ILIKE $2
+                  )
+                """,
+                workshop_id, search_pattern,
+            )
+            
+            rows = await conn.fetch(
+                """
+                SELECT
+                  s.id,
+                  s.sticker_number,
+                  s.expiration_date,
+                  s.issued_at,
+                  s.status,
+                  s.sticker_order_id,
+                  so.name as order_name,
+                  so.workshop_id,
+                  c.license_plate
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c ON c.sticker_id = s.id
+                WHERE so.workshop_id = $1
+                  AND (
+                    s.sticker_number ILIKE $2 OR
+                    c.license_plate ILIKE $2 OR
+                    so.name ILIKE $2 OR
+                    CAST(s.id AS TEXT) ILIKE $2
+                  )
+                ORDER BY s.id DESC
+                LIMIT $3 OFFSET $4
+                """,
+                workshop_id, search_pattern, per_page, offset,
+            )
+        else:
+            total_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                WHERE so.workshop_id = $1
+                """,
+                workshop_id,
+            )
+            
+            rows = await conn.fetch(
+                """
+                SELECT
+                  s.id,
+                  s.sticker_number,
+                  s.expiration_date,
+                  s.issued_at,
+                  s.status,
+                  s.sticker_order_id,
+                  so.name as order_name,
+                  so.workshop_id,
+                  c.license_plate
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c ON c.sticker_id = s.id
+                WHERE so.workshop_id = $1
+                ORDER BY s.id DESC
+                LIMIT $2 OFFSET $3
+                """,
+                workshop_id, per_page, offset,
+            )
 
     stickers = []
     for r in rows:
