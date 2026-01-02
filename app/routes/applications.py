@@ -843,7 +843,8 @@ async def revert_to_completed(app_id):
 @applications_bp.route("/<int:app_id>/report-abandonment", methods=["POST"])
 async def report_abandonment(app_id):
     """
-    Cambia el estado de una aplicación de 'Pendiente' a 'Abandonado'.
+    Cambia el estado de una aplicación a 'Abandonado'.
+    Acepta aplicaciones con estado 'Pendiente', 'A Inspeccionar', 'En curso' o 'Emitir CRT'.
     Si es la primera revisión del vehículo, desasigna la oblea y la marca como Disponible.
     Si no es la primera, desasigna la oblea y la marca como No Disponible.
     """
@@ -867,9 +868,10 @@ async def report_abandonment(app_id):
                 return jsonify({"error": "Trámite no encontrado"}), 404
             
             current_status = (application["status"] or "").strip()
-            if current_status != "Pendiente":
+            allowed_statuses = ["Pendiente", "A Inspeccionar", "En curso", "Emitir CRT"]
+            if current_status not in allowed_statuses:
                 return jsonify({
-                    "error": f"No se puede reportar abandono. El estado actual es '{current_status}', debe ser 'Pendiente'"
+                    "error": f"No se puede reportar abandono. El estado actual es '{current_status}', debe ser uno de: {', '.join(allowed_statuses)}"
                 }), 400
             
             car_id = application["car_id"]
