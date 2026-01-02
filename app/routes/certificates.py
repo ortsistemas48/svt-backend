@@ -1111,6 +1111,77 @@ async def certificates_job_status(job_id: str):
         return jsonify({"error": "job_id no encontrado"}), 404
     return jsonify(j), 200
 
+# ---------- FUNCIÓN AUXILIAR PARA ACTUALIZAR ESTADO A COMPLETADO ----------
+async def _update_application_status_to_completed(app_id: int, resultado: str, is_second_inspection: bool, max_retries: int = 3) -> None:
+    """
+    Actualiza el estado de la aplicación a "Completado" con transacción explícita,
+    verificación y reintentos para asegurar que siempre se actualice correctamente.
+    
+    Args:
+        app_id: ID de la aplicación
+        resultado: Resultado de la inspección
+        is_second_inspection: Si es segunda inspección
+        max_retries: Número máximo de reintentos (default: 3)
+    
+    Raises:
+        RuntimeError: Si no se pudo actualizar después de todos los reintentos
+    """
+    update_success = False
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            async with get_conn_ctx() as conn:
+                # Usar transacción explícita para asegurar atomicidad
+                async with conn.transaction():
+                    if is_second_inspection:
+                        updated_row = await conn.fetchrow(
+                            """
+                            UPDATE applications
+                            SET status = $1,
+                                result_2 = $2
+                            WHERE id = $3
+                            RETURNING id, status, result_2
+                            """,
+                            "Completado",
+                            resultado,
+                            app_id,
+                        )
+                    else:
+                        updated_row = await conn.fetchrow(
+                            """
+                            UPDATE applications
+                            SET status = $1,
+                                result = $2
+                            WHERE id = $3
+                            RETURNING id, status, result
+                            """,
+                            "Completado",
+                            resultado,
+                            app_id,
+                        )
+                    
+                    # Verificar que la actualización se completó correctamente
+                    if updated_row and updated_row["status"] == "Completado":
+                        update_success = True
+                        log.info("Estado actualizado a 'Completado' para aplicación %s (intento %d/%d)", app_id, attempt + 1, max_retries)
+                        break
+                    else:
+                        last_error = RuntimeError(f"Actualización no confirmada: estado={updated_row['status'] if updated_row else 'None'}")
+                        log.warning("Actualización no confirmada para aplicación %s (intento %d/%d)", app_id, attempt + 1, max_retries)
+        except Exception as e:
+            last_error = e
+            log.warning("Error actualizando estado de aplicación %s (intento %d/%d): %s", app_id, attempt + 1, max_retries, e)
+            if attempt < max_retries - 1:
+                # Esperar un poco antes de reintentar (backoff exponencial)
+                await asyncio.sleep(0.5 * (2 ** attempt))
+                continue
+    
+    # Si después de todos los reintentos no se pudo actualizar, lanzar error
+    if not update_success:
+        log.error("No se pudo actualizar el estado a 'Completado' para aplicación %s después de %d intentos", app_id, max_retries)
+        raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite después de {max_retries} intentos: {last_error}")
+
 # ---------- FUNCIÓN PARA GENERAR SOLO EL PDF (SIN SUBIR) ----------
 async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, dict]:
     """
@@ -1463,35 +1534,8 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
     file_name = "certificado_2.pdf" if is_second_inspection else "certificado.pdf"
     
     # Actualizar estado de la aplicación a "Completado" cuando se crea el PDF
-    try:
-        async with get_conn_ctx() as conn:
-            if is_second_inspection:
-                await conn.execute(
-                    """
-                    UPDATE applications
-                    SET status = $1,
-                        result_2 = $2
-                    WHERE id = $3
-                    """,
-                    "Completado",
-                    resultado,
-                    app_id,
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE applications
-                    SET status = $1,
-                        result = $2
-                    WHERE id = $3
-                    """,
-                    "Completado",
-                    resultado,
-                    app_id,
-                )
-    except Exception as e:
-        log.exception("Error actualizando estado de aplicación %s: %s", app_id, e)
-        raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
+    # Usar función auxiliar con transacción explícita, verificación y reintentos
+    await _update_application_status_to_completed(app_id, resultado, is_second_inspection)
     
     # Preparar metadata para la función de subida
     metadata = {
@@ -2029,34 +2073,9 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     except Exception as e:
         raise RuntimeError(f"PDF generado, no se pudo subir a Supabase Storage, {e}")
 
-    try:
-        async with get_conn_ctx() as conn:
-            if is_second_inspection:
-                await conn.execute(
-                    """
-                    UPDATE applications
-                    SET status = $1,
-                        result_2 = $2
-                    WHERE id = $3
-                    """,
-                    "Completado",
-                    resultado,
-                    app_id,
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE applications
-                    SET status = $1,
-                        result = $2
-                    WHERE id = $3
-                    """,
-                    "Completado",
-                    resultado,
-                    app_id,
-                )
-    except Exception as e:
-        raise RuntimeError(f"PDF generado, no se pudo actualizar el estado del trámite, {e}")
+    # Actualizar estado de la aplicación a "Completado" cuando se crea el PDF
+    # Usar función auxiliar con transacción explícita, verificación y reintentos
+    await _update_application_status_to_completed(app_id, resultado, is_second_inspection)
 
     # ----- DEBUG RESUMEN FINAL (opcional por env var CRT_DEBUG=1) -----
     if os.getenv("CRT_DEBUG") == "1":
