@@ -1573,7 +1573,7 @@ async def _update_application_background(app_id: int, pdf_bytes: bytes, file_nam
     condicion = metadata["condicion"]
     row = metadata["row"]
     try:
-        async with get_conn_ctx() as conn:
+        async with get_conn_ctx() as conn: 
             # Verificar si es la primera revisión del vehículo cuando da rechazado
             if condicion == "Rechazado" and row.get("sticker_id"):
                 # Obtener el car_id de la aplicación actual
