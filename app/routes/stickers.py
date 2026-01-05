@@ -273,7 +273,7 @@ async def get_stickers_by_workshop(workshop_id: int):
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
     q = (request.args.get("q") or "").strip()
-    
+    status = request.args.get("status", None)
     if page < 1:
         page = 1
     if per_page < 1:
@@ -281,31 +281,66 @@ async def get_stickers_by_workshop(workshop_id: int):
     if per_page > 100:
         per_page = 100
     
+    # Normalize status value
+    normalized_status = None
+    if status:
+        raw_status = str(status).strip().lower()
+        norm_map = {
+            "disponible": "Disponible",
+            "no disponible": "No Disponible",
+            "nodisponible": "No Disponible",
+            "en uso": "En Uso",
+            "enuso": "En Uso",
+        }
+        normalized_status = norm_map.get(raw_status)
+        # If not in map, try exact match (case-insensitive)
+        if not normalized_status:
+            for key, value in norm_map.items():
+                if value.lower() == raw_status:
+                    normalized_status = value
+                    break
+    
     offset = (page - 1) * per_page
 
     async with get_conn_ctx() as conn:
         # Build search condition
         if q:
             search_pattern = f"%{q}%"
-            total_count = await conn.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM stickers s
-                JOIN sticker_orders so ON so.id = s.sticker_order_id
-                LEFT JOIN cars c ON c.sticker_id = s.id
-                WHERE so.workshop_id = $1
-                  AND (
+            params = [workshop_id, search_pattern]
+            param_idx = 3
+            
+            # Build WHERE conditions
+            where_conditions = ["so.workshop_id = $1", "AND ("]
+            where_conditions.append("""
                     s.sticker_number ILIKE $2 OR
                     c.license_plate ILIKE $2 OR
                     so.name ILIKE $2 OR
                     CAST(s.id AS TEXT) ILIKE $2
-                  )
+                  )""")
+            
+            if normalized_status:
+                where_conditions.append(f"AND s.status = ${param_idx}")
+                params.append(normalized_status)
+                param_idx += 1
+            
+            where_clause = " ".join(where_conditions)
+            
+            total_count = await conn.fetchval(
+                f"""
+                SELECT COUNT(*)
+                FROM stickers s
+                JOIN sticker_orders so ON so.id = s.sticker_order_id
+                LEFT JOIN cars c ON c.sticker_id = s.id
+                WHERE {where_clause}
                 """,
-                workshop_id, search_pattern,
+                *params,
             )
             
+            limit_idx = param_idx
+            offset_idx = param_idx + 1
+            
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                   s.id,
                   s.sticker_number,
@@ -319,31 +354,41 @@ async def get_stickers_by_workshop(workshop_id: int):
                 FROM stickers s
                 JOIN sticker_orders so ON so.id = s.sticker_order_id
                 LEFT JOIN cars c ON c.sticker_id = s.id
-                WHERE so.workshop_id = $1
-                  AND (
-                    s.sticker_number ILIKE $2 OR
-                    c.license_plate ILIKE $2 OR
-                    so.name ILIKE $2 OR
-                    CAST(s.id AS TEXT) ILIKE $2
-                  )
+                WHERE {where_clause}
                 ORDER BY s.id DESC
-                LIMIT $3 OFFSET $4
+                LIMIT ${limit_idx} OFFSET ${offset_idx}
                 """,
-                workshop_id, search_pattern, per_page, offset,
+                *params, per_page, offset,
             )
         else:
+            params = [workshop_id]
+            param_idx = 2
+            
+            # Build WHERE conditions
+            where_conditions = ["so.workshop_id = $1"]
+            
+            if normalized_status:
+                where_conditions.append(f"AND s.status = ${param_idx}")
+                params.append(normalized_status)
+                param_idx += 1
+            
+            where_clause = " ".join(where_conditions)
+            
             total_count = await conn.fetchval(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM stickers s
                 JOIN sticker_orders so ON so.id = s.sticker_order_id
-                WHERE so.workshop_id = $1
+                WHERE {where_clause}
                 """,
-                workshop_id,
+                *params,
             )
             
+            limit_idx = param_idx
+            offset_idx = param_idx + 1
+            
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT
                   s.id,
                   s.sticker_number,
@@ -357,11 +402,11 @@ async def get_stickers_by_workshop(workshop_id: int):
                 FROM stickers s
                 JOIN sticker_orders so ON so.id = s.sticker_order_id
                 LEFT JOIN cars c ON c.sticker_id = s.id
-                WHERE so.workshop_id = $1
+                WHERE {where_clause}
                 ORDER BY s.id DESC
-                LIMIT $2 OFFSET $3
+                LIMIT ${limit_idx} OFFSET ${offset_idx}
                 """,
-                workshop_id, per_page, offset,
+                *params, per_page, offset,
             )
 
     stickers = []
