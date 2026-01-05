@@ -598,7 +598,17 @@ async def list_full_applications_by_workshop(workshop_id: int):
     status = (request.args.get("status") or "").strip()
     status_in_raw = (request.args.get("status_in") or "").strip()
     status_list = [s.strip() for s in status_in_raw.split(",") if s.strip()]
+    dateFilter = (request.args.get("dateFilter") or "").strip()
     offset = (page - 1) * per_page
+    
+    # Parse and validate dateFilter
+    parsed_date = None
+    if dateFilter:
+        try:
+            parsed_date = parser.parse(dateFilter).date()
+        except (ValueError, TypeError):
+            # Invalid date format - skip filter
+            pass
 
     # --- Filtros dinámicos ---
     filters = [
@@ -631,6 +641,11 @@ async def list_full_applications_by_workshop(workshop_id: int):
         # Solo usar status_in si no se especifica status
         filters.append(f"a.status = ANY(${len(params)+1}::text[])")
         params.append(status_list)
+    
+    # Filtro por fecha
+    if parsed_date:
+        filters.append(f"a.date::date = ${len(params)+1}")
+        params.append(parsed_date)
 
     filters.append("""
         (
@@ -761,7 +776,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
         "filters": {
             "q": q,
             "status": status,
-            "status_in": status_list
+            "status_in": status_list,
+            "dateFilter": dateFilter
         }
     }), 200 
 
