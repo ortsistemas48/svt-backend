@@ -861,8 +861,13 @@ async def report_abandonment(app_id):
     """
     Cambia el estado de una aplicación a 'Abandonado'.
     Acepta aplicaciones con estado 'Pendiente', 'A Inspeccionar', 'En curso' o 'Emitir CRT'.
-    Si es la primera revisión del vehículo, desasigna la oblea y la marca como Disponible.
-    Si no es la primera, desasigna la oblea y la marca como No Disponible.
+    
+    Lógica de manejo de oblea:
+    - Si es la primera revisión:
+      * Estado 'Pendiente': desasigna la oblea y la marca como 'Disponible'
+      * Otros estados ('A Inspeccionar', 'En curso', 'Emitir CRT'): desasigna la oblea y la marca como 'No Disponible'
+    - Si NO es la primera revisión:
+      * Mantiene la oblea asignada al vehículo y la marca como 'En Uso' (sin desasignar)
     """
     user_id = g.get("user_id")
     if not user_id:
@@ -935,30 +940,49 @@ async def report_abandonment(app_id):
                 "Abandonado", app_id
             )
             
-            # Si hay sticker asignado, desasignarlo y actualizar su estado
+            # Si hay sticker asignado, manejar según la lógica nueva
             if sticker_id:
-                # Desasignar el sticker del vehículo
-                await conn.execute(
-                    "UPDATE cars SET sticker_id = NULL WHERE id = $1",
-                    car_id
-                )
-                
-                # Actualizar estado del sticker según si es primera aplicación o no
                 if is_first_application:
+                    # Primera revisión: desasignar y cambiar estado según status
                     await conn.execute(
-                        "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
-                        sticker_id
+                        "UPDATE cars SET sticker_id = NULL WHERE id = $1",
+                        car_id
                     )
+                    
+                    if current_status == "Pendiente":
+                        await conn.execute(
+                            "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                            sticker_id
+                        )
+                    else:  # 'A Inspeccionar', 'En curso', 'Emitir CRT'
+                        await conn.execute(
+                            "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                            sticker_id
+                        )
                 else:
+                    # NO es primera revisión: mantener asignada y poner en 'En Uso'
                     await conn.execute(
-                        "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                        "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
                         sticker_id
                     )
+                    # NO desasignar (mantener sticker_id en cars)
+    
+    # Determinar qué pasó con la oblea para la respuesta
+    sticker_action = None
+    if sticker_id:
+        if is_first_application:
+            if current_status == "Pendiente":
+                sticker_action = "unassigned_disponible"
+            else:
+                sticker_action = "unassigned_no_disponible"
+        else:
+            sticker_action = "kept_assigned_en_uso"
     
     return jsonify({
         "message": "Abandono reportado exitosamente",
         "is_first_application": is_first_application,
-        "sticker_unassigned": sticker_id is not None
+        "sticker_action": sticker_action,
+        "sticker_unassigned": sticker_action in ["unassigned_disponible", "unassigned_no_disponible"] if sticker_action else False
     }), 200
 
 @applications_bp.route("/workshop/<int:workshop_id>/completed", methods=["GET"])
