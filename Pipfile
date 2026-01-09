@@ -20,6 +20,8 @@ qrcode = "*"
 requests = "*"
 pillow = "*"
 pytz = "*"
+hypercorn = "*"
+python-dateutil = "*"
 
 [dev-packages]
 
