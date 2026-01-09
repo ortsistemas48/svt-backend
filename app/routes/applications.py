@@ -705,7 +705,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 s.status AS sticker_status,
                 i1.created_at AS inspection_1_date,
                 i2.created_at AS inspection_2_date,
-                ara.previous_status AS previous_status
+                ara.previous_status AS previous_status,
+                ara.created_at AS previous_status_date
             FROM applications a
             LEFT JOIN users u ON a.user_id = u.id
             LEFT JOIN persons o ON a.owner_id = o.id
@@ -769,6 +770,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             ),
             "sticker_number": r["sticker_number"],
             "previous_status": r["previous_status"],
+            "previous_status_date": r["previous_status_date"].isoformat() if r["previous_status_date"] else None,
         })
 
     return jsonify({
