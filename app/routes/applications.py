@@ -704,7 +704,8 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 s.sticker_number,
                 s.status AS sticker_status,
                 i1.created_at AS inspection_1_date,
-                i2.created_at AS inspection_2_date
+                i2.created_at AS inspection_2_date,
+                ara.previous_status AS previous_status
             FROM applications a
             LEFT JOIN users u ON a.user_id = u.id
             LEFT JOIN persons o ON a.owner_id = o.id
@@ -713,6 +714,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             LEFT JOIN stickers s ON c.sticker_id = s.id
             LEFT JOIN inspections i1 ON a.id = i1.application_id AND COALESCE(i1.is_second, FALSE) = FALSE
             LEFT JOIN inspections i2 ON a.id = i2.application_id AND COALESCE(i2.is_second, FALSE) = TRUE
+            LEFT JOIN applications_report_audit ara on a.id = ara.application_id
             WHERE {where_sql}
             ORDER BY a.date DESC NULLS LAST
             LIMIT ${limit_idx} OFFSET ${offset_idx}
@@ -766,6 +768,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 else None
             ),
             "sticker_number": r["sticker_number"],
+            "previous_status": r["previous_status"],
         })
 
     return jsonify({
