@@ -2393,6 +2393,8 @@ async def create_category_observation(workshop_id: int, step_id: int, category_i
             """
             INSERT INTO observations (workshop_id, step_id, subcategory_id, description)
             VALUES ($1, $2, $3, $4)
+            ON CONFLICT (workshop_id, step_id, subcategory_id, description)
+            DO UPDATE SET description = EXCLUDED.description
             RETURNING id, description
             """,
             workshop_id, step_id, subcat["id"], desc
