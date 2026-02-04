@@ -48,6 +48,8 @@ async def statistics_overview(workshop_id: int):
                     FROM applications a
                     WHERE a.workshop_id = $1
                       AND a.is_deleted IS NOT TRUE
+                      AND a.owner_id IS NOT NULL
+                      AND a.car_id IS NOT NULL
                       AND a.date::date BETWEEN $2 AND $3
                 )
                 SELECT
@@ -114,6 +116,8 @@ async def statistics_daily(workshop_id: int):
                   FROM applications a
                   WHERE a.workshop_id = $1
                     AND a.is_deleted IS NOT TRUE
+                    AND a.owner_id IS NOT NULL
+                    AND a.car_id IS NOT NULL
                     AND a.date::date BETWEEN $2 AND $3
                 )
                 SELECT d,
@@ -164,6 +168,8 @@ async def statistics_status_breakdown(workshop_id: int):
                 FROM applications a
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.date::date BETWEEN $2 AND $3
                 GROUP BY status
                 ORDER BY c DESC NULLS LAST
@@ -195,6 +201,8 @@ async def statistics_results_breakdown(workshop_id: int):
                 FROM applications a
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.status = 'Completado'
                   AND a.date::date BETWEEN $2 AND $3
                 GROUP BY result
@@ -231,6 +239,8 @@ async def statistics_top_models(workshop_id: int):
                 JOIN cars c ON c.id = a.car_id
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.date::date BETWEEN $2 AND $3
                   AND (NULLIF(trim(c.model), '') IS NOT NULL OR NULLIF(trim(c.brand), '') IS NOT NULL)
                 GROUP BY c.brand, c.model
@@ -268,6 +278,8 @@ async def statistics_top_brands(workshop_id: int):
                 JOIN cars c ON c.id = a.car_id
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.date::date BETWEEN $2 AND $3
                   AND NULLIF(trim(c.brand), '') IS NOT NULL
                 GROUP BY c.brand
@@ -300,6 +312,8 @@ async def statistics_usage_types(workshop_id: int):
                 JOIN cars c ON c.id = a.car_id
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.date::date BETWEEN $2 AND $3
                   AND NULLIF(trim(c.usage_type), '') IS NOT NULL
                 GROUP BY c.usage_type
@@ -339,6 +353,8 @@ async def statistics_common_errors(workshop_id: int):
                 JOIN steps s ON s.id = idet.step_id
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND a.date::date BETWEEN $2 AND $3
                   AND idet.status IN ('Condicional', 'Rechazado')
                   AND NULLIF(trim(s.name), '') IS NOT NULL
@@ -396,6 +412,8 @@ async def statistics_upcoming_expirations(workshop_id: int):
                 LEFT JOIN persons p ON p.id = a.owner_id
                 WHERE a.workshop_id = $1
                   AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
                   AND i.expiration_date IS NOT NULL
                   AND i.expiration_date::date >= $2
                   AND i.expiration_date::date <= $3
