@@ -26,9 +26,8 @@ async def get_condicional_expired():
     - result_2 IS NULL (sin segunda inspección)
     - Pasaron más de 60 días desde el campo date
 
-    Para cada aplicación con car_id:
-    - Si el car solo apareció esa vez en el historial: marca sticker + desasigna del car
-    - Si el car tuvo applications anteriores pero no hay más después de esta: marca sticker, NO desasigna
+    Para cada aplicación con car_id (solo vez en historial, o última sin posteriores):
+    Marca sticker con 'No Disponible' e is_expired_application TRUE. Nunca desasigna.
     """
     if not _validate_api_key():
         return jsonify({"error": "API key inválida o faltante"}), 401
@@ -47,7 +46,6 @@ async def get_condicional_expired():
             )
 
             stickers_updated = []
-            cars_unassigned = []
 
             for r in rows:
                 car_id = r["car_id"]
@@ -91,30 +89,16 @@ async def get_condicional_expired():
                 has_apps_after = (apps_after or 0) > 0
 
                 # Solo actuar si: (a) es la única app del car, o (b) tuvo anteriores pero no hay posteriores
-                if app_count == 1:
-                    unassign = True
-                elif app_count > 1 and not has_apps_after:
-                    unassign = False  # Tuvo anteriores, no hay posteriores: marcar pero no desasignar
-                else:
-                    continue  # Hay posteriores, no tocamos nada
-
-                # Marcar sticker: status 'No Disponible', is_expired_application TRUE
-                await conn.execute(
-                    """
-                    UPDATE stickers
-                    SET status = 'No Disponible', is_expired_application = TRUE
-                    WHERE id = $1
-                    """,
-                    sticker_id,
-                )
-                stickers_updated.append(sticker_id)
-
-                if unassign:
+                if app_count == 1 or (app_count > 1 and not has_apps_after):
                     await conn.execute(
-                        "UPDATE cars SET sticker_id = NULL WHERE id = $1",
-                        car_id,
+                        """
+                        UPDATE stickers
+                        SET status = 'No Disponible', is_expired_application = TRUE
+                        WHERE id = $1
+                        """,
+                        sticker_id,
                     )
-                    cars_unassigned.append(car_id)
+                    stickers_updated.append(sticker_id)
 
     items = [
         {
@@ -134,5 +118,4 @@ async def get_condicional_expired():
         "count": len(items),
         "applications": items,
         "stickers_updated": stickers_updated,
-        "cars_unassigned": cars_unassigned,
     }), 200
