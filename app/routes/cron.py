@@ -24,10 +24,16 @@ async def get_condicional_expired():
     Busca en la tabla applications las revisiones que:
     - result = 'Condicional'
     - result_2 IS NULL (sin segunda inspección)
+    - is_expired no es TRUE (aún no procesadas por este cron)
     - Pasaron más de 60 días desde el campo date
 
-    Para cada aplicación con car_id (solo vez en historial, o última sin posteriores):
-    Marca sticker con 'No Disponible' e is_expired_application TRUE. Nunca desasigna.
+    Para cada aplicación con car_id:
+    - Si es la primera vez del vehículo (única application con ese car_id): se desasigna
+      la oblea (sticker_id = NULL en cars), el sticker se marca 'No Disponible' e
+      is_expired_application TRUE.
+    - Si no es la primera pero es la última (sin posteriores): no se toca la oblea.
+    En ambos casos se actualiza result a 'Condicional Vencido' e is_expired = TRUE,
+    para que no se vuelvan a procesar en futuras ejecuciones.
     """
     if not _validate_api_key():
         return jsonify({"error": "API key inválida o faltante"}), 401
@@ -40,12 +46,14 @@ async def get_condicional_expired():
                 FROM applications
                 WHERE result = 'Condicional'
                   AND result_2 IS NULL
+                  AND (is_expired IS NOT TRUE OR is_expired IS NULL)
                   AND date + INTERVAL '60 days' < NOW()
                 ORDER BY date ASC
                 """
             )
 
             stickers_updated = []
+            applications_updated = []  # app_ids con result actualizado a Condicional Vencido
 
             for r in rows:
                 car_id = r["car_id"]
@@ -90,15 +98,32 @@ async def get_condicional_expired():
 
                 # Solo actuar si: (a) es la única app del car, o (b) tuvo anteriores pero no hay posteriores
                 if app_count == 1 or (app_count > 1 and not has_apps_after):
+                    # En ambos casos: actualizar result de la application a Condicional Vencido
                     await conn.execute(
                         """
-                        UPDATE stickers
-                        SET status = 'No Disponible', is_expired_application = TRUE
+                        UPDATE applications
+                        SET result = 'Condicional Vencido', is_expired = TRUE
                         WHERE id = $1
                         """,
-                        sticker_id,
+                        app_id,
                     )
-                    stickers_updated.append(sticker_id)
+                    applications_updated.append(app_id)
+                    if app_count == 1:
+                        # Primera vez del vehículo: desasignar oblea y marcar sticker
+                        await conn.execute(
+                            "UPDATE cars SET sticker_id = NULL WHERE id = $1",
+                            car_id,
+                        )
+                        await conn.execute(
+                            """
+                            UPDATE stickers
+                            SET status = 'No Disponible', is_expired_application = TRUE
+                            WHERE id = $1
+                            """,
+                            sticker_id,
+                        )
+                        stickers_updated.append(sticker_id)
+                    # Si app_count > 1 y no hay posteriores: no se toca la oblea
 
     items = [
         {
@@ -107,7 +132,7 @@ async def get_condicional_expired():
             "workshop_id": r["workshop_id"],
             "date": r["date"].isoformat() if r["date"] else None,
             "status": r["status"],
-            "result": r["result"],
+            "result": "Condicional Vencido" if r["id"] in applications_updated else r["result"],
             "result_2": r["result_2"],
             "car_id": r["car_id"],
         }
