@@ -1,7 +1,10 @@
 # app/blueprints/payments_admin.py
-from quart import Blueprint, request, jsonify, g
+from quart import Blueprint, request, jsonify, g, Response
 from app.db import get_conn_ctx
+from supabase import create_client, Client
+import os
 import logging
+import httpx
 
 payments_admin_bp = Blueprint("payments_admin", __name__, url_prefix="/payments/admin")
 logger = logging.getLogger("payments_admin")
@@ -11,6 +14,9 @@ IN_REVIEW = "IN_REVIEW"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
 VALID_STATES = (PENDING, IN_REVIEW, APPROVED, REJECTED)
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 async def _is_admin(conn, user_id: int) -> bool:
     return await conn.fetchval("SELECT COALESCE(is_admin, false) FROM users WHERE id = $1", user_id)
@@ -270,3 +276,76 @@ async def admin_set_status(order_id: int):
         "order": dict(row),
         "workshop": dict(updated_workshop) if updated_workshop else None,
     }), 200
+
+
+@payments_admin_bp.route("/orders/<int:order_id>/receipt/download", methods=["GET"])
+async def admin_download_receipt(order_id: int):
+    """
+    Descarga el comprobante de pago a través del backend (proxy).
+    Evita problemas de CORS y permite descargar directamente.
+    """
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        if not await _is_admin(conn, user_id):
+            return jsonify({"error": "Requiere admin"}), 403
+
+        order = await conn.fetchrow(
+            "SELECT receipt_url, receipt_mime FROM payment_orders WHERE id = $1",
+            order_id,
+        )
+        if not order:
+            return jsonify({"error": "Orden no encontrada"}), 404
+
+    receipt_url = order["receipt_url"]
+    if not receipt_url:
+        return jsonify({"error": "La orden no tiene comprobante cargado"}), 400
+
+    mime = order["receipt_mime"] or "application/octet-stream"
+
+    # Derivar bucket y path desde la URL pública
+    try:
+        prefix = "/storage/v1/object/public/"
+        idx = receipt_url.index(prefix)
+        bucket_and_path = receipt_url[idx + len(prefix):]
+        bucket = bucket_and_path.split("/")[0]
+        object_path = "/".join(bucket_and_path.split("/")[1:])
+    except Exception:
+        return jsonify({"error": "No se pudo parsear la URL del comprobante"}), 500
+
+    # Descargar el archivo desde Supabase usando service role key
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        file_bytes = client.storage.from_(bucket).download(object_path)
+    except Exception as e:
+        logger.exception("admin_download_receipt, error descargando de Supabase, %s", _log_ctx(order_id=order_id))
+        return jsonify({"error": "No se pudo descargar el archivo"}), 502
+
+    # Extraer nombre legible del path (última parte después del uuid)
+    raw_name = object_path.rsplit("/", 1)[-1] if "/" in object_path else object_path
+    # Quitar prefijo UUID (32 hex chars + guión)
+    if len(raw_name) > 33 and raw_name[32] == "-":
+        raw_name = raw_name[33:]
+    if not raw_name:
+        raw_name = f"comprobante-orden-{order_id}"
+
+    ext_map = {
+        "application/pdf": ".pdf",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    }
+    if "." not in raw_name:
+        raw_name += ext_map.get(mime, "")
+
+    return Response(
+        file_bytes,
+        status=200,
+        headers={
+            "Content-Type": mime,
+            "Content-Disposition": f'attachment; filename="{raw_name}"',
+            "Content-Length": str(len(file_bytes)),
+        },
+    )
