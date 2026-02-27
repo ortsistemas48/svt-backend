@@ -400,25 +400,35 @@ async def statistics_upcoming_expirations(workshop_id: int):
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
                 """
-                SELECT 
-                    i.expiration_date,
+                SELECT
+                    ii.expiration_date,
                     c.license_plate,
                     p.phone_number,
                     p.email,
                     p.first_name || ' ' || p.last_name AS name
-                FROM applications a
-                JOIN inspections i ON i.application_id = a.id
-                JOIN cars c ON c.id = a.car_id
-                LEFT JOIN persons p ON p.id = a.owner_id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND i.expiration_date IS NOT NULL
-                  AND i.expiration_date::date >= $2
-                  AND i.expiration_date::date <= $3
-                ORDER BY i.expiration_date::date ASC
-                LIMIT $4
+                    FROM applications a
+                    JOIN (
+                    -- Elegimos una sola inspección por aplicación, priorizando las secundarias
+                    SELECT DISTINCT ON (i.application_id)
+                        i.application_id,
+                        i.expiration_date
+                    FROM inspections i
+                    WHERE i.expiration_date IS NOT NULL
+                    ORDER BY i.application_id, i.is_second DESC, i.expiration_date DESC
+                    ) AS ii
+                    ON ii.application_id = a.id
+                    JOIN cars c
+                    ON c.id = a.car_id
+                    LEFT JOIN persons p
+                    ON p.id = a.owner_id
+                    WHERE a.workshop_id = $1
+                    AND a.is_deleted IS NOT TRUE
+                    AND a.owner_id IS NOT NULL
+                    AND a.car_id IS NOT NULL
+                    AND ii.expiration_date::date >= $2
+                    AND ii.expiration_date::date <= $3
+                    ORDER BY ii.expiration_date::date ASC
+                    LIMIT $4;
                 """,
                 workshop_id, today_ar, max_date, limit
             )
