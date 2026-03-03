@@ -682,31 +682,33 @@ async def list_full_applications_by_workshop(workshop_id: int):
         rows = await conn.fetch(
             f"""
             SELECT
-                a.id,
-                concat(u.first_name, ' ', u.last_name) AS user_name,
-                a.date,
-                a.status,
-                a.result,
-                a.result_2,
-                o.first_name  AS owner_first_name,
-                o.last_name   AS owner_last_name,
-                o.dni         AS owner_dni,
-                o.cuit        AS owner_cuit,
-                o.razon_social AS owner_razon_social,
-                d.first_name  AS driver_first_name,
-                d.last_name   AS driver_last_name,
-                d.dni         AS driver_dni,
-                d.cuit        AS driver_cuit,
-                d.razon_social AS driver_razon_social,
-                c.license_plate,
-                c.brand,
-                c.model,
-                s.sticker_number,
-                s.status AS sticker_status,
-                i1.created_at AS inspection_1_date,
-                i2.created_at AS inspection_2_date,
-                ara.previous_status AS previous_status,
-                ara.created_at AS previous_status_date
+            a.id,
+            concat(u.first_name, ' ', u.last_name) AS user_name,
+            a.date,
+            a.status,
+            a.result,
+            a.result_2,
+            o.first_name  AS owner_first_name,
+            o.last_name   AS owner_last_name,
+            o.dni         AS owner_dni,
+            o.cuit        AS owner_cuit,
+            o.razon_social AS owner_razon_social,
+            d.first_name  AS driver_first_name,
+            d.last_name   AS driver_last_name,
+            d.dni         AS driver_dni,
+            d.cuit        AS driver_cuit,
+            d.razon_social AS driver_razon_social,
+            ara.previous_sticker_number AS previous_sticker_number,
+            c.license_plate,
+            c.brand,
+            c.model,
+            s.sticker_number,
+            s.status AS sticker_status,
+            i1.created_at AS inspection_1_date,
+            i2.created_at AS inspection_2_date,
+            ara.previous_status AS previous_status,
+            ara.previous_sticker_number AS previous_sticker_number,
+            ara.created_at AS previous_status_date
             FROM applications a
             LEFT JOIN users u ON a.user_id = u.id
             LEFT JOIN persons o ON a.owner_id = o.id
@@ -715,7 +717,13 @@ async def list_full_applications_by_workshop(workshop_id: int):
             LEFT JOIN stickers s ON c.sticker_id = s.id
             LEFT JOIN inspections i1 ON a.id = i1.application_id AND COALESCE(i1.is_second, FALSE) = FALSE
             LEFT JOIN inspections i2 ON a.id = i2.application_id AND COALESCE(i2.is_second, FALSE) = TRUE
-            LEFT JOIN applications_report_audit ara on a.id = ara.application_id
+            LEFT JOIN LATERAL (
+            SELECT previous_sticker_number, previous_status, created_at
+            FROM applications_report_audit
+            WHERE application_id = a.id
+            ORDER BY created_at DESC
+            LIMIT 1
+            ) ara ON TRUE
             WHERE {where_sql}
             ORDER BY a.date DESC NULLS LAST
             LIMIT ${limit_idx} OFFSET ${offset_idx}
@@ -769,6 +777,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 else None
             ),
             "sticker_number": r["sticker_number"],
+            "previous_sticker_number": r["previous_sticker_number"],
             "previous_status": r["previous_status"],
             "previous_status_date": r["previous_status_date"].isoformat() if r["previous_status_date"] else None,
         })
