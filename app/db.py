@@ -1,5 +1,6 @@
 import asyncpg
 import os
+import ssl
 from contextlib import asynccontextmanager
 
 db_pool: asyncpg.Pool | None = None
@@ -7,17 +8,23 @@ db_pool: asyncpg.Pool | None = None
 async def init_db() -> None:
 
     global db_pool
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
     db_pool = await asyncpg.create_pool(
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME"),
         host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT", 5432)),
-        # Importante para PgBouncer en modo transaction
-        statement_cache_size=0,                # evita server side prepares
-        max_inactive_connection_lifetime=30.0, # cierra conexiones ociosas
-        command_timeout=60.0,                  # timeout razonable
-        min_size=1,
+        ssl=ssl_ctx,
+        # PgBouncer transaction-mode settings
+        statement_cache_size=0,
+        max_inactive_connection_lifetime=300.0,
+        command_timeout=60.0,
+        min_size=0,
         max_size=int(os.getenv("DB_POOL_MAX_SIZE", 10)),
     )
 
@@ -35,7 +42,7 @@ async def get_conn_ctx():
     El manejo de transacciones queda a cargo del llamador.
     """
     pool = _assert_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=10.0) as conn:
         try:
             yield conn
         finally:
