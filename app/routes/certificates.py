@@ -71,6 +71,13 @@ def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
         s *= 0.85
     return s
 
+def _valid_doc_value(v) -> bool:
+    """True si el valor es un documento válido (excluye None, '', 'None', 'null')."""
+    if v is None:
+        return False
+    s = str(v).strip()
+    return bool(s) and s.lower() not in ("none", "null")
+
 def _add_transparent_redaction(page: fitz.Page, rect: fitz.Rect):
     page.add_redact_annot(rect, text=None, fill=False, cross_out=False)
 
@@ -1224,6 +1231,7 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
             o.last_name  AS owner_last_name,
             o.dni        AS owner_dni,
             o.cuit       AS owner_cuit,
+            o.passport_number AS owner_passport_number,
             o.razon_social AS owner_razon_social,
             o.street     AS owner_street,
             o.city       AS owner_city,
@@ -1233,6 +1241,7 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
             d.last_name  AS driver_last_name,
             d.dni        AS driver_dni,
             d.cuit       AS driver_cuit,
+            d.passport_number AS driver_passport_number,
 
             c.license_plate    AS car_plate,
             c.brand            AS car_brand,
@@ -1372,22 +1381,44 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
     documento = None
     documento_label = "D.N.I."
     using_cuit = False
-    if row.get("owner_cuit"):
-        documento = row["owner_cuit"]
+    if _valid_doc_value(row.get("owner_cuit")):
+        documento = str(row["owner_cuit"]).strip()
         documento_label = "CUIT"
         using_cuit = True
-    elif row.get("owner_dni"):
-        documento = row["owner_dni"]
-        documento_label = "D.N.I."
+    elif _valid_doc_value(row.get("owner_dni")) or _valid_doc_value(row.get("owner_passport_number")):
+        if _valid_doc_value(row.get("owner_dni")):
+            documento = str(row["owner_dni"]).strip()
+            documento_label = "D.N.I."
+        else:
+            documento = str(row["owner_passport_number"]).strip()
+            documento_label = "PAS"
         using_cuit = False
-    elif row.get("driver_dni"):
-        documento = row["driver_dni"]
-        documento_label = "D.N.I."
+    elif _valid_doc_value(row.get("driver_dni")) or _valid_doc_value(row.get("driver_passport_number")):
+        if _valid_doc_value(row.get("driver_dni")):
+            documento = str(row["driver_dni"]).strip()
+            documento_label = "D.N.I."
+        else:
+            documento = str(row["driver_passport_number"]).strip()
+            documento_label = "PAS"
         using_cuit = False
-    elif row.get("driver_cuit"):
-        documento = row["driver_cuit"]
+    elif _valid_doc_value(row.get("driver_cuit")):
+        documento = str(row["driver_cuit"]).strip()
         documento_label = "CUIT"
         using_cuit = True
+
+    if os.getenv("CRT_DEBUG") == "1":
+        log.info(
+            "[CRT][documento] app_id=%s owner_dni=%r owner_cuit=%r owner_passport=%r driver_dni=%r driver_cuit=%r driver_passport=%r -> documento=%r label=%s",
+            app_id,
+            row.get("owner_dni"),
+            row.get("owner_cuit"),
+            row.get("owner_passport_number"),
+            row.get("driver_dni"),
+            row.get("driver_cuit"),
+            row.get("driver_passport_number"),
+            documento,
+            documento_label,
+        )
 
     if using_cuit and (row.get("owner_razon_social")):
         owner_fullname = row["owner_razon_social"]
@@ -1491,7 +1522,7 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) - TITULAR" or "",
+        "${nombre_apellido2}":      (f"{owner_fullname} ({documento_label} {documento}) - TITULAR" if documento else f"{owner_fullname} - TITULAR") or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
@@ -1690,6 +1721,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             o.last_name  AS owner_last_name,
             o.dni        AS owner_dni,
             o.cuit       AS owner_cuit,
+            o.passport_number AS owner_passport_number,
             o.razon_social AS owner_razon_social,
             o.street     AS owner_street,
             o.city       AS owner_city,
@@ -1699,6 +1731,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
             d.last_name  AS driver_last_name,
             d.dni        AS driver_dni,
             d.cuit       AS driver_cuit,
+            d.passport_number AS driver_passport_number,
 
             c.license_plate    AS car_plate,
             c.brand            AS car_brand,
@@ -1890,22 +1923,44 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     documento = None
     documento_label = "D.N.I."
     using_cuit = False
-    if row.get("owner_cuit"):
-        documento = row["owner_cuit"]
+    if _valid_doc_value(row.get("owner_cuit")):
+        documento = str(row["owner_cuit"]).strip()
         documento_label = "CUIT"
         using_cuit = True
-    elif row.get("owner_dni"):
-        documento = row["owner_dni"]
-        documento_label = "D.N.I."
+    elif _valid_doc_value(row.get("owner_dni")) or _valid_doc_value(row.get("owner_passport_number")):
+        if _valid_doc_value(row.get("owner_dni")):
+            documento = str(row["owner_dni"]).strip()
+            documento_label = "D.N.I."
+        else:
+            documento = str(row["owner_passport_number"]).strip()
+            documento_label = "PAS"
         using_cuit = False
-    elif row.get("driver_dni"):
-        documento = row["driver_dni"]
-        documento_label = "D.N.I."
+    elif _valid_doc_value(row.get("driver_dni")) or _valid_doc_value(row.get("driver_passport_number")):
+        if _valid_doc_value(row.get("driver_dni")):
+            documento = str(row["driver_dni"]).strip()
+            documento_label = "D.N.I."
+        else:
+            documento = str(row["driver_passport_number"]).strip()
+            documento_label = "PAS"
         using_cuit = False
-    elif row.get("driver_cuit"):
-        documento = row["driver_cuit"]
+    elif _valid_doc_value(row.get("driver_cuit")):
+        documento = str(row["driver_cuit"]).strip()
         documento_label = "CUIT"
         using_cuit = True
+
+    if os.getenv("CRT_DEBUG") == "1":
+        log.info(
+            "[CRT][documento] app_id=%s owner_dni=%r owner_cuit=%r owner_passport=%r driver_dni=%r driver_cuit=%r driver_passport=%r -> documento=%r label=%s",
+            app_id,
+            row.get("owner_dni"),
+            row.get("owner_cuit"),
+            row.get("owner_passport_number"),
+            row.get("driver_dni"),
+            row.get("driver_cuit"),
+            row.get("driver_passport_number"),
+            documento,
+            documento_label,
+        )
 
     if using_cuit and (row.get("owner_razon_social")):
         owner_fullname = row["owner_razon_social"]
@@ -2026,7 +2081,7 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         "${taller}":                row["workshop_name"] or "",
         "${num_reg}":               str(row["workshop_plant_number"] or ""),
         "${nombre_apellido}":       owner_fullname or "",
-        "${nombre_apellido2}":      f"{owner_fullname} ({documento_label} {str(documento)}) - TITULAR" or "",
+        "${nombre_apellido2}":      (f"{owner_fullname} ({documento_label} {documento}) - TITULAR" if documento else f"{owner_fullname} - TITULAR") or "",
         "${documento}":             str(documento or ""),
         "${documento2}":            str(documento or ""),
         "${domicilio}":             domicilio or "",
