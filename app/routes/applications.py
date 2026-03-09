@@ -17,23 +17,35 @@ def validate_dni_cuit(dni=None, cuit=None, razon_social=None):
     Retorna (error_message, status_code) o (None, None) si es válido
     """
     if cuit:
-        # Validar que CUIT tenga exactamente 11 dígitos
         cuit_clean = re.sub(r'\D', '', str(cuit))
         if len(cuit_clean) != 11:
             return "CUIT debe tener exactamente 11 dígitos", 400
-        
-        # Si se envía CUIT, razon_social es obligatorio
         if not razon_social or not razon_social.strip():
             return "razon_social es obligatorio cuando se envía CUIT", 400
-    
+
     if dni:
-        # Validar que DNI tenga máximo 9 dígitos
         dni_clean = re.sub(r'\D', '', str(dni))
         if len(dni_clean) > 9:
             return "DNI debe tener máximo 9 dígitos", 400
         if len(dni_clean) == 0:
             return "DNI no puede estar vacío", 400
-    
+
+    return None, None
+
+
+def validate_passport(passport_number=None):
+    """
+    Valida passport_number: alfanumérico, longitud 1-20.
+    Retorna (error_message, status_code) o (None, None) si es válido
+    """
+    if passport_number:
+        pn = str(passport_number).strip()
+        if not pn:
+            return "El número de pasaporte no puede estar vacío", 400
+        if len(pn) > 20:
+            return "El número de pasaporte debe tener máximo 20 caracteres", 400
+        if not re.fullmatch(r"[A-Za-z0-9]{1,20}", pn):
+            return "El número de pasaporte debe ser alfanumérico (letras y dígitos)", 400
     return None, None
 
 # Paso 1: Crear trámite vacío vinculado al user actual
@@ -69,78 +81,86 @@ async def create_application():
 async def add_or_update_owner(app_id):
     data = await request.get_json()
     app_id = int(app_id)
-    
-    # Obtener DNI y CUIT (al menos uno debe estar presente)
+
+    doc_type = (data.get("doc_type") or "").upper()
+
     dni = data.get("dni")
     cuit = data.get("cuit")
     razon_social = data.get("razon_social") or data.get("razonSocial")
-    
-    # Verificar si DNI fue enviado explícitamente (incluso si está vacío)
+    passport_number = data.get("passport_number")
+
     dni_was_sent = "dni" in data
     cuit_was_sent = "cuit" in data
     razon_social_was_sent = "razon_social" in data or "razonSocial" in data
-    
-    if not dni_was_sent and not cuit_was_sent:
-        return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
-    
-    # Validar DNI/CUIT y razon_social
-    error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
-    if error_msg:
-        return jsonify({"error": error_msg}), status_code
-    
-    # Limpiar DNI y CUIT (solo dígitos)
-    # Si DNI fue enviado pero está vacío, dni_clean será None (para actualizar a NULL)
-    # Si DNI no fue enviado, dni_clean será None pero no lo actualizaremos
-    dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
-    cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
-    
+    passport_was_sent = "passport_number" in data
+
+    if doc_type == "PAS":
+        if not passport_number:
+            return jsonify({"error": "Se debe proporcionar el número de pasaporte"}), 400
+        error_msg, status_code = validate_passport(passport_number=passport_number)
+        if error_msg:
+            return jsonify({"error": error_msg}), status_code
+        passport_clean = str(passport_number).strip()
+        dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+        cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
+    else:
+        if not dni_was_sent and not cuit_was_sent:
+            return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
+        error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
+        if error_msg:
+            return jsonify({"error": error_msg}), status_code
+        dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+        cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
+        passport_clean = None
+
     async with get_conn_ctx() as conn:
-        # Buscar persona existente por DNI o CUIT
         existing_person_id = None
-        if dni_clean:
+
+        if doc_type == "PAS":
             existing_person_id = await conn.fetchval(
-                "SELECT id FROM persons WHERE dni = $1", dni_clean
+                "SELECT id FROM persons WHERE passport_number = $1", passport_clean
             )
-        if not existing_person_id and cuit_clean:
-            existing_person_id = await conn.fetchval(
-                "SELECT id FROM persons WHERE cuit = $1", cuit_clean
-            )
-        
+        else:
+            if dni_clean:
+                existing_person_id = await conn.fetchval(
+                    "SELECT id FROM persons WHERE dni = $1", dni_clean
+                )
+            if not existing_person_id and cuit_clean:
+                existing_person_id = await conn.fetchval(
+                    "SELECT id FROM persons WHERE cuit = $1", cuit_clean
+                )
+
         if existing_person_id:
-            # Obtener valores actuales si no fueron enviados para mantenerlos
             current_person = await conn.fetchrow(
-                "SELECT dni, cuit, razon_social FROM persons WHERE id = $1", existing_person_id
+                "SELECT dni, cuit, razon_social, passport_number FROM persons WHERE id = $1", existing_person_id
             )
-            
-            # Determinar valores finales: si fue enviado, usar el nuevo (puede ser NULL); si no, mantener el actual
+
             final_dni = dni_clean if dni_was_sent else current_person["dni"]
             final_cuit = cuit_clean if cuit_was_sent else current_person["cuit"]
             final_razon_social = razon_social if razon_social_was_sent else current_person["razon_social"]
-            
-            # Usar la persona existente y actualizar sus datos
+            final_passport = passport_clean if passport_was_sent else current_person["passport_number"]
+
             await conn.execute("""
                 UPDATE persons
                 SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, is_owner = TRUE, dni = $8, 
-                    cuit = $9, razon_social = $10
-                WHERE id = $11
+                    city = $6, province = $7, is_owner = TRUE, dni = $8,
+                    cuit = $9, razon_social = $10, passport_number = $11
+                WHERE id = $12
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), 
-                final_dni, final_cuit, final_razon_social, existing_person_id)
-            
-            # Asignar la persona existente a la aplicación
+                data.get("address"), data.get("city"), data.get("province"),
+                final_dni, final_cuit, final_razon_social, final_passport, existing_person_id)
+
             await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", existing_person_id, app_id)
             owner_id = existing_person_id
         else:
-            # Crear nueva persona solo si no existe
             owner_id = await conn.fetchval("""
-                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, is_owner)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, passport_number, is_owner)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), 
-                dni_clean, cuit_clean, razon_social)
-            
+                data.get("address"), data.get("city"), data.get("province"),
+                dni_clean, cuit_clean, razon_social, passport_clean)
+
             await conn.execute("UPDATE applications SET owner_id = $1 WHERE id = $2", owner_id, app_id)
 
     return jsonify({"message": "Titular guardado", "person_id": owner_id}), 200
@@ -151,7 +171,7 @@ async def add_or_update_driver(app_id):
     data = await request.get_json()
     is_same = data.get("is_same_person", False)
     app_id = int(app_id)
-    
+
     async with get_conn_ctx() as conn:
         if is_same:
             owner_id = await conn.fetchval("SELECT owner_id FROM applications WHERE id = $1", app_id)
@@ -161,75 +181,83 @@ async def add_or_update_driver(app_id):
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", owner_id, app_id)
             return jsonify({"message": "Conductor asignado como titular", "person_id": owner_id}), 200
 
-        # Obtener DNI y CUIT (al menos uno debe estar presente)
+        doc_type = (data.get("doc_type") or "").upper()
+
         dni = data.get("dni")
         cuit = data.get("cuit")
         razon_social = data.get("razon_social") or data.get("razonSocial")
-        
-        # Verificar si DNI fue enviado explícitamente (incluso si está vacío)
+        passport_number = data.get("passport_number")
+
         dni_was_sent = "dni" in data
         cuit_was_sent = "cuit" in data
         razon_social_was_sent = "razon_social" in data or "razonSocial" in data
-        
-        if not dni_was_sent and not cuit_was_sent:
-            return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
-        
-        # Validar DNI/CUIT y razon_social
-        error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
-        if error_msg:
-            return jsonify({"error": error_msg}), status_code
-        
-        # Limpiar DNI y CUIT (solo dígitos)
-        # Si DNI fue enviado pero está vacío, dni_clean será None (para actualizar a NULL)
-        # Si DNI no fue enviado, dni_clean será None pero no lo actualizaremos
-        dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
-        cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
-        
-        # Buscar persona existente por DNI o CUIT
+        passport_was_sent = "passport_number" in data
+
+        if doc_type == "PAS":
+            if not passport_number:
+                return jsonify({"error": "Se debe proporcionar el número de pasaporte"}), 400
+            error_msg, status_code = validate_passport(passport_number=passport_number)
+            if error_msg:
+                return jsonify({"error": error_msg}), status_code
+            passport_clean = str(passport_number).strip()
+            dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+            cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
+        else:
+            if not dni_was_sent and not cuit_was_sent:
+                return jsonify({"error": "Se debe proporcionar DNI o CUIT"}), 400
+            error_msg, status_code = validate_dni_cuit(dni=dni, cuit=cuit, razon_social=razon_social)
+            if error_msg:
+                return jsonify({"error": error_msg}), status_code
+            dni_clean = re.sub(r'\D', '', str(dni)) if dni else None
+            cuit_clean = re.sub(r'\D', '', str(cuit)) if cuit else None
+            passport_clean = None
+
         existing_person_id = None
-        if dni_clean:
+
+        if doc_type == "PAS":
             existing_person_id = await conn.fetchval(
-                "SELECT id FROM persons WHERE dni = $1", dni_clean
+                "SELECT id FROM persons WHERE passport_number = $1", passport_clean
             )
-        if not existing_person_id and cuit_clean:
-            existing_person_id = await conn.fetchval(
-                "SELECT id FROM persons WHERE cuit = $1", cuit_clean
-            )
-        
+        else:
+            if dni_clean:
+                existing_person_id = await conn.fetchval(
+                    "SELECT id FROM persons WHERE dni = $1", dni_clean
+                )
+            if not existing_person_id and cuit_clean:
+                existing_person_id = await conn.fetchval(
+                    "SELECT id FROM persons WHERE cuit = $1", cuit_clean
+                )
+
         if existing_person_id:
-            # Obtener valores actuales si no fueron enviados para mantenerlos
             current_person = await conn.fetchrow(
-                "SELECT dni, cuit, razon_social FROM persons WHERE id = $1", existing_person_id
+                "SELECT dni, cuit, razon_social, passport_number FROM persons WHERE id = $1", existing_person_id
             )
-            
-            # Determinar valores finales: si fue enviado, usar el nuevo (puede ser NULL); si no, mantener el actual
+
             final_dni = dni_clean if dni_was_sent else current_person["dni"]
             final_cuit = cuit_clean if cuit_was_sent else current_person["cuit"]
             final_razon_social = razon_social if razon_social_was_sent else current_person["razon_social"]
-            
-            # Usar la persona existente y actualizar sus datos
+            final_passport = passport_clean if passport_was_sent else current_person["passport_number"]
+
             await conn.execute("""
                 UPDATE persons
                 SET first_name = $1, last_name = $2, email = $3, phone_number = $4, street = $5,
-                    city = $6, province = $7, is_owner = FALSE, dni = $8, 
-                    cuit = $9, razon_social = $10
-                WHERE id = $11
+                    city = $6, province = $7, is_owner = FALSE, dni = $8,
+                    cuit = $9, razon_social = $10, passport_number = $11
+                WHERE id = $12
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), 
-                final_dni, final_cuit, final_razon_social, existing_person_id)
-            
-            # Asignar la persona existente como conductor
+                data.get("address"), data.get("city"), data.get("province"),
+                final_dni, final_cuit, final_razon_social, final_passport, existing_person_id)
+
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", existing_person_id, app_id)
             return jsonify({"message": "Conductor guardado", "person_id": existing_person_id}), 200
         else:
-            # Crear nueva persona solo si no existe
             driver_id = await conn.fetchval("""
-                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, is_owner)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE)
+                INSERT INTO persons (first_name, last_name, email, phone_number, street, city, province, dni, cuit, razon_social, passport_number, is_owner)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, FALSE)
                 RETURNING id
             """, data.get("first_name"), data.get("last_name"), data.get("email"), data.get("phone"),
-                data.get("address"), data.get("city"), data.get("province"), 
-                dni_clean, cuit_clean, razon_social)
+                data.get("address"), data.get("city"), data.get("province"),
+                dni_clean, cuit_clean, razon_social, passport_clean)
 
             await conn.execute("UPDATE applications SET driver_id = $1 WHERE id = $2", driver_id, app_id)
             return jsonify({"message": "Conductor guardado", "person_id": driver_id}), 200
@@ -628,7 +656,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                 o.razon_social   ILIKE $2 OR
                 o.cuit           ILIKE $2 OR
                 o.dni::text      ILIKE $2 OR
-                s.sticker_number ILIKE $2
+                o.passport_number ILIKE $2
             )
         """)
         params.append(f"%{q}%")
@@ -688,16 +716,18 @@ async def list_full_applications_by_workshop(workshop_id: int):
             a.status,
             a.result,
             a.result_2,
-            o.first_name  AS owner_first_name,
-            o.last_name   AS owner_last_name,
-            o.dni         AS owner_dni,
-            o.cuit        AS owner_cuit,
-            o.razon_social AS owner_razon_social,
-            d.first_name  AS driver_first_name,
-            d.last_name   AS driver_last_name,
-            d.dni         AS driver_dni,
-            d.cuit        AS driver_cuit,
-            d.razon_social AS driver_razon_social,
+            o.first_name       AS owner_first_name,
+            o.last_name        AS owner_last_name,
+            o.dni              AS owner_dni,
+            o.cuit             AS owner_cuit,
+            o.razon_social     AS owner_razon_social,
+            o.passport_number  AS owner_passport_number,
+            d.first_name       AS driver_first_name,
+            d.last_name        AS driver_last_name,
+            d.dni              AS driver_dni,
+            d.cuit             AS driver_cuit,
+            d.razon_social     AS driver_razon_social,
+            d.passport_number  AS driver_passport_number,
             ara.previous_sticker_number AS previous_sticker_number,
             c.license_plate,
             c.brand,
@@ -744,21 +774,22 @@ async def list_full_applications_by_workshop(workshop_id: int):
             "inspection_2_date": r["inspection_2_date"].isoformat() if r["inspection_2_date"] else None,
             "owner": (
                 {
-                    "first_name": r["owner_first_name"],
-                    "last_name":  r["owner_last_name"],
-                    "dni":        r["owner_dni"],
-                    "cuit":       r["owner_cuit"],
-                    "razon_social": r["owner_razon_social"],
+                    "first_name":      r["owner_first_name"],
+                    "last_name":       r["owner_last_name"],
+                    "dni":             r["owner_dni"],
+                    "cuit":            r["owner_cuit"],
+                    "razon_social":    r["owner_razon_social"],
+                    "passport_number": r["owner_passport_number"],
                 }
-                
             ),
             "driver": (
                 {
-                    "first_name": r["driver_first_name"],
-                    "last_name":  r["driver_last_name"],
-                    "dni":        r["driver_dni"],
-                    "cuit":       r["driver_cuit"],
-                    "razon_social": r["driver_razon_social"],
+                    "first_name":      r["driver_first_name"],
+                    "last_name":       r["driver_last_name"],
+                    "dni":             r["driver_dni"],
+                    "cuit":            r["driver_cuit"],
+                    "razon_social":    r["driver_razon_social"],
+                    "passport_number": r["driver_passport_number"],
                 }
                 if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
                 else None
@@ -1116,6 +1147,7 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 o.first_name     ILIKE ${param_count} OR
                 o.last_name      ILIKE ${param_count} OR
                 o.razon_social   ILIKE ${param_count} OR
+                o.passport_number ILIKE ${param_count} OR
                 o.cuit           ILIKE ${param_count} OR
                 o.dni::text      ILIKE ${param_count} OR
                 a.result         ILIKE ${param_count} OR
@@ -1174,17 +1206,20 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 a.status,
                 a.result,
                 a.result_2,
-                o.first_name  AS owner_first_name,
-                o.last_name   AS owner_last_name,
-                o.dni         AS owner_dni,
-                o.razon_social AS owner_razon_social,
-                o.cuit         AS owner_cuit,
-                d.first_name  AS driver_first_name,
-                d.last_name   AS driver_last_name,
-                d.dni         AS driver_dni,
-                d.cuit        AS driver_cuit,
-                d.razon_social AS driver_razon_social,
+                o.first_name       AS owner_first_name,
+                o.last_name        AS owner_last_name,
+                o.dni              AS owner_dni,
+                o.razon_social     AS owner_razon_social,
+                o.cuit             AS owner_cuit,
+                o.passport_number  AS owner_passport_number,
+                d.first_name       AS driver_first_name,
+                d.last_name        AS driver_last_name,
+                d.dni              AS driver_dni,
+                d.cuit             AS driver_cuit,
+                d.razon_social     AS driver_razon_social,
+                d.passport_number  AS driver_passport_number,
                 s.sticker_number AS sticker_number,
+                o.passport_number AS owner_passport_number,
                 c.license_plate,
                 c.brand,
                 c.model
@@ -1213,22 +1248,25 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 "sticker_number": r["sticker_number"],
                 "owner": (
                     {
-                        "first_name": r["owner_first_name"],
-                        "last_name":  r["owner_last_name"],
-                        "dni":        r["owner_dni"],
-                        "cuit":       r["owner_cuit"],
-                        "razon_social": r["owner_razon_social"],
+                        "first_name":      r["owner_first_name"],
+                        "last_name":       r["owner_last_name"],
+                        "dni":             r["owner_dni"],
+                        "cuit":            r["owner_cuit"],
+                        "razon_social":    r["owner_razon_social"],
+                        "passport_number": r["owner_passport_number"],
+                                                
                     }
                     if (r["owner_first_name"] or r["owner_last_name"] or r["owner_dni"] is not None)
                     else None
                 ),
                 "driver": (
                     {
-                        "first_name": r["driver_first_name"],
-                        "last_name":  r["driver_last_name"],
-                        "dni":        r["driver_dni"],
-                        "cuit":       r["driver_cuit"],
-                        "razon_social": r["driver_razon_social"],
+                        "first_name":      r["driver_first_name"],
+                        "last_name":       r["driver_last_name"],
+                        "dni":             r["driver_dni"],
+                        "cuit":            r["driver_cuit"],
+                        "razon_social":    r["driver_razon_social"],
+                        "passport_number": r["driver_passport_number"],
                     }
                     if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
                     else None
