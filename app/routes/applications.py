@@ -1219,7 +1219,6 @@ async def list_completed_applications_by_workshop(workshop_id: int):
                 d.razon_social     AS driver_razon_social,
                 d.passport_number  AS driver_passport_number,
                 s.sticker_number AS sticker_number,
-                o.passport_number AS owner_passport_number,
                 c.license_plate,
                 c.brand,
                 c.model
