@@ -47,7 +47,7 @@ async def get_condicional_expired():
                 WHERE result = 'Condicional'
                   AND result_2 IS NULL
                   AND (is_expired IS NOT TRUE OR is_expired IS NULL)
-                  AND date + INTERVAL '60 days' < NOW()
+                  AND (date + INTERVAL '60 days')::date <= CURRENT_DATE
                 ORDER BY date ASC
                 """
             )
