@@ -1,6 +1,6 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
-from supabase import create_client, Client
+from app.supabase_client import SUPABASE_URL, get_supabase_client, supabase_dns_workaround
 import os
 import uuid
 import datetime as dt
@@ -16,15 +16,8 @@ log = logging.getLogger(__name__)
 PENDING = "PENDING"
 IN_REVIEW = "IN_REVIEW"
 
-# ===== Supabase config local a este archivo =====
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# ===== Supabase (storage) =====
 BUCKET_DOCS = os.getenv("SUPABASE_BUCKET_DOCS", "certificados")  # usa tu bucket existente
-
-def _get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def _public_url(bucket: str, path: str) -> str:
     base = (SUPABASE_URL or "").rstrip("/")
@@ -53,15 +46,16 @@ def _upload_to_storage_with_retry(dest: str, data: bytes, content_type: str, max
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            client = _get_supabase_client()
-            client.storage.from_(BUCKET_DOCS).upload(
-                path=dest,
-                file=data,
-                file_options={
-                    "content_type": content_type,
-                    "x-upsert": "true",
-                },
-            )
+            with supabase_dns_workaround():
+                client = get_supabase_client()
+                client.storage.from_(BUCKET_DOCS).upload(
+                    path=dest,
+                    file=data,
+                    file_options={
+                        "content_type": content_type,
+                        "x-upsert": "true",
+                    },
+                )
             return
         except Exception as exc:
             last_error = exc
@@ -268,8 +262,9 @@ async def delete_payment_receipt(order_id: int):
       object_path = receipt_url.split(marker, 1)[-1]
       object_path = f"comprobantes/{object_path}"
 
-    client = _get_supabase_client()
-    client.storage.from_(bucket).remove([object_path])
+    with supabase_dns_workaround():
+        client = get_supabase_client()
+        client.storage.from_(bucket).remove([object_path])
 
     async with get_conn_ctx() as conn:
         await conn.execute(

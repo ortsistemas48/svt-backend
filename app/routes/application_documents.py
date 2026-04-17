@@ -1,7 +1,7 @@
 # app/routes/application_documents.py
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
-from supabase import create_client, Client
+from app.supabase_client import SUPABASE_URL, get_supabase_client, supabase_dns_workaround
 import os
 import uuid
 import re, unicodedata
@@ -11,8 +11,6 @@ import logging
 docs_bp = Blueprint("application_documents", __name__)
 log = logging.getLogger(__name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET_DOCS  = os.getenv("SUPABASE_BUCKET_DOCS", "certificados")
 
 MAX_FILE_MB = 20  # alineado con el front
@@ -25,11 +23,6 @@ ALLOWED_CAR_typeS = {
     "insurance_front",
     "insurance_back",
 }
-
-def _get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def _public_url(bucket: str, path: str) -> str:
     base = (SUPABASE_URL or "").rstrip("/")
@@ -58,15 +51,16 @@ def _upload_to_storage_with_retry(dest: str, data: bytes, content_type: str, max
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            client = _get_supabase_client()
-            client.storage.from_(BUCKET_DOCS).upload(
-                path=dest,
-                file=data,
-                file_options={
-                    "content_type": content_type,
-                    "x-upsert": "true",
-                },
-            )
+            with supabase_dns_workaround():
+                client = get_supabase_client()
+                client.storage.from_(BUCKET_DOCS).upload(
+                    path=dest,
+                    file=data,
+                    file_options={
+                        "content_type": content_type,
+                        "x-upsert": "true",
+                    },
+                )
             return
         except Exception as exc:
             last_error = exc
@@ -217,8 +211,9 @@ async def delete_document(app_id: int, doc_id: int):
         if not doc:
             return jsonify({"error": "Documento no encontrado"}), 404
 
-        client = _get_supabase_client()
-        client.storage.from_(doc["bucket"]).remove([doc["object_path"]])
+        with supabase_dns_workaround():
+            client = get_supabase_client()
+            client.storage.from_(doc["bucket"]).remove([doc["object_path"]])
 
         await conn.execute("DELETE FROM application_documents WHERE id = $1", doc_id)
 

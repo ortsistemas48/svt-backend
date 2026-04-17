@@ -9,7 +9,7 @@ from dateutil import tz
 from app.db import get_conn_ctx
 from datetime import datetime, timedelta
 import pytz
-from supabase import create_client, Client
+from app.supabase_client import SUPABASE_URL, get_supabase_client, supabase_dns_workaround
 import textwrap
 from fitz import PDF_REDACT_IMAGE_NONE, PDF_REDACT_LINE_ART_NONE, PDF_REDACT_TEXT_REMOVE
 import asyncio
@@ -33,8 +33,6 @@ log = logging.getLogger(__name__)
 certificates_bp = Blueprint("certificates", __name__)
 
 # ---------- Supabase helpers ----------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 BUCKET_CERTS = os.getenv("SUPABASE_BUCKET_CERTS", "certificados")
 
 def _adjust_font_size_by_length(ph: str, base_size: float, value: str) -> float:
@@ -81,11 +79,6 @@ def _valid_doc_value(v) -> bool:
 def _add_transparent_redaction(page: fitz.Page, rect: fitz.Rect):
     page.add_redact_annot(rect, text=None, fill=False, cross_out=False)
 
-def _get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
 def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3) -> str:
     """
     Sube un PDF a Supabase Storage con reintentos en caso de errores SSL/conexión.
@@ -109,26 +102,27 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
     
     for attempt in range(max_retries):
         try:
-            if sb is None:
-                sb = _get_supabase_client()
-            
-            upload_result = sb.storage.from_(BUCKET_CERTS).upload(
-                file=data,
-                path=path,
-                file_options={"content-type": "application/pdf", "x-upsert": "true"},
-            )
-            
-            res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
+            with supabase_dns_workaround():
+                if sb is None:
+                    sb = get_supabase_client()
+
+                upload_result = sb.storage.from_(BUCKET_CERTS).upload(
+                    file=data,
+                    path=path,
+                    file_options={"content-type": "application/pdf", "x-upsert": "true"},
+                )
+
+                res = sb.storage.from_(BUCKET_CERTS).get_public_url(path)
             if isinstance(res, dict):
                 url = res.get("publicUrl") or res.get("public_url") or ""
             else:
                 url = str(res)
-            
+
             if url:
                 return url
             else:
                 raise RuntimeError("No se pudo obtener la URL pública del archivo subido")
-            
+
         except Exception as e:
             last_error = e
             error_msg = str(e).lower()

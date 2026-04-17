@@ -1,7 +1,7 @@
 # app/blueprints/payments_admin.py
 from quart import Blueprint, request, jsonify, g, Response
 from app.db import get_conn_ctx
-from supabase import create_client, Client
+from app.supabase_client import get_supabase_client, supabase_dns_workaround
 import os
 import logging
 import httpx
@@ -14,9 +14,6 @@ IN_REVIEW = "IN_REVIEW"
 APPROVED = "APPROVED"
 REJECTED = "REJECTED"
 VALID_STATES = (PENDING, IN_REVIEW, APPROVED, REJECTED)
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 async def _is_admin(conn, user_id: int) -> bool:
     return await conn.fetchval("SELECT COALESCE(is_admin, false) FROM users WHERE id = $1", user_id)
@@ -317,8 +314,9 @@ async def admin_download_receipt(order_id: int):
 
     # Descargar el archivo desde Supabase usando service role key
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        file_bytes = client.storage.from_(bucket).download(object_path)
+        with supabase_dns_workaround():
+            client = get_supabase_client()
+            file_bytes = client.storage.from_(bucket).download(object_path)
     except Exception as e:
         logger.exception("admin_download_receipt, error descargando de Supabase, %s", _log_ctx(order_id=order_id))
         return jsonify({"error": "No se pudo descargar el archivo"}), 502

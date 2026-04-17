@@ -1,7 +1,7 @@
 # app/routes/inspection_documents.py
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
-from supabase import create_client, Client
+from app.supabase_client import SUPABASE_URL, get_supabase_client, supabase_dns_workaround
 import os
 import uuid
 import re, unicodedata
@@ -11,15 +11,8 @@ import logging
 inspection_docs_bp = Blueprint("inspection_documents", __name__)
 log = logging.getLogger(__name__)
 
-# ==== Supabase config local a este archivo ====
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# ==== Supabase (storage) ====
 BUCKET_INSPECTION_DOCS = os.getenv("SUPABASE_BUCKET_INSPECTION_DOCS", "inspections")
-
-def _get_supabase_client() -> Client:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY")
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def _public_url(bucket: str, path: str) -> str:
     base = (SUPABASE_URL or "").rstrip("/")
@@ -48,15 +41,16 @@ def _upload_to_storage_with_retry(bucket: str, dest: str, data: bytes, content_t
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            client = _get_supabase_client()
-            client.storage.from_(bucket).upload(
-                path=dest,
-                file=data,
-                file_options={
-                    "content_type": content_type,
-                    "x-upsert": "true",
-                },
-            )
+            with supabase_dns_workaround():
+                client = get_supabase_client()
+                client.storage.from_(bucket).upload(
+                    path=dest,
+                    file=data,
+                    file_options={
+                        "content_type": content_type,
+                        "x-upsert": "true",
+                    },
+                )
             return
         except Exception as exc:
             last_error = exc
@@ -313,8 +307,9 @@ async def delete_inspection_document(inspection_id: int, doc_id: int):
         if not doc:
             return jsonify({"error": "Documento no encontrado"}), 404
 
-        client = _get_supabase_client()
-        client.storage.from_(doc["bucket"]).remove([doc["object_path"]])
+        with supabase_dns_workaround():
+            client = get_supabase_client()
+            client.storage.from_(doc["bucket"]).remove([doc["object_path"]])
 
         await conn.execute("DELETE FROM inspection_documents WHERE id = $1", doc_id)
 
