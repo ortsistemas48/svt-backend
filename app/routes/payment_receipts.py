@@ -6,8 +6,11 @@ import uuid
 import datetime as dt
 import unicodedata
 import re
+import time
+import logging
 
 payment_receipts_bp = Blueprint("payment_receipts", __name__, url_prefix="/payments")
+log = logging.getLogger(__name__)
 
 # Estados de órdenes de pago
 PENDING = "PENDING"
@@ -26,6 +29,52 @@ def _get_supabase_client() -> Client:
 def _public_url(bucket: str, path: str) -> str:
     base = (SUPABASE_URL or "").rstrip("/")
     return f"{base}/storage/v1/object/public/{bucket}/{path}"
+
+def _is_transient_storage_error(exc: Exception) -> bool:
+    error_msg = str(exc).lower()
+    error_type = type(exc).__name__.lower()
+    transient_markers = (
+        "temporary failure in name resolution",
+        "name resolution",
+        "connecterror",
+        "connectionerror",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "connection reset",
+        "service unavailable",
+        "gateway timeout",
+    )
+    return any(marker in error_msg for marker in transient_markers) or any(
+        marker in error_type for marker in ("connecterror", "timeout", "connectionerror")
+    )
+
+def _upload_to_storage_with_retry(client: Client, dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            client.storage.from_(BUCKET_DOCS).upload(
+                path=dest,
+                file=data,
+                file_options={
+                    "content_type": content_type,
+                    "x-upsert": "true",
+                },
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            if _is_transient_storage_error(exc) and attempt < max_retries:
+                backoff_seconds = 0.4 * (2 ** (attempt - 1))
+                log.warning(
+                    "Reintentando subida de comprobante (%s/%s) por error transitorio: %s",
+                    attempt,
+                    max_retries,
+                    exc,
+                )
+                time.sleep(backoff_seconds)
+                continue
+            raise last_error
 
 # ===== Helpers de acceso =====
 async def _is_admin(conn, user_id: int) -> bool:
@@ -102,17 +151,19 @@ async def upload_payment_receipt(order_id: int):
     
     dest = f"comprobantes/payments/{order_id}/{uuid.uuid4().hex}-{safe_name}"
 
-    # file_options: usar content_type (no content-type) y x-upsert como string
-    file_options = {
-        "content_type": mime,
-        "x-upsert": "true",
-    }
-
-    client.storage.from_(BUCKET_DOCS).upload(
-        path=dest,
-        file=data,
-        file_options=file_options,
-    )
+    try:
+        _upload_to_storage_with_retry(
+            client=client,
+            dest=dest,
+            data=data,
+            content_type=mime,
+            max_retries=3,
+        )
+    except Exception as e:
+        status_code = 502 if _is_transient_storage_error(e) else 500
+        return jsonify({
+            "error": f"No se pudo subir el comprobante {f.filename}: {str(e)}"
+        }), status_code
 
     url = _public_url(BUCKET_DOCS, dest)
     # guardar en la orden y cambiar estado de PENDING a IN_REVIEW si corresponde
