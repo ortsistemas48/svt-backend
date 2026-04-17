@@ -44,10 +44,11 @@ def _is_transient_storage_error(exc: Exception) -> bool:
         marker in error_type for marker in ("connecterror", "timeout", "connectionerror")
     )
 
-def _upload_to_storage_with_retry(client: Client, bucket: str, dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
+def _upload_to_storage_with_retry(bucket: str, dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
+            client = _get_supabase_client()
             client.storage.from_(bucket).upload(
                 path=dest,
                 file=data,
@@ -161,7 +162,6 @@ async def upload_inspection_documents(inspection_id: int):
     if role == "step" and step_id is None:
         return jsonify({"error": "Falta step_id para role = 'step'"}), 400
 
-    client = _get_supabase_client()
     saved = []
 
     # Soporte para marcar "frente del vehículo" (solo para type=vehicle_photo)
@@ -204,7 +204,6 @@ async def upload_inspection_documents(inspection_id: int):
 
         try:
             _upload_to_storage_with_retry(
-                client=client,
                 bucket=BUCKET_INSPECTION_DOCS,
                 dest=dest,
                 data=data,

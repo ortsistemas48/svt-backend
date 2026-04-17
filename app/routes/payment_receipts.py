@@ -49,10 +49,11 @@ def _is_transient_storage_error(exc: Exception) -> bool:
         marker in error_type for marker in ("connecterror", "timeout", "connectionerror")
     )
 
-def _upload_to_storage_with_retry(client: Client, dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
+def _upload_to_storage_with_retry(dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
+            client = _get_supabase_client()
             client.storage.from_(BUCKET_DOCS).upload(
                 path=dest,
                 file=data,
@@ -140,8 +141,6 @@ async def upload_payment_receipt(order_id: int):
     if mime not in allowed:
         return jsonify({"error": "Formato inválido, permitidos, PNG, JPG, WEBP o PDF"}), 415
 
-    client = _get_supabase_client()
-    
     # Sanitizar nombre del archivo para evitar problemas de encoding
     # Normalizar caracteres Unicode y eliminar caracteres no ASCII
     safe_name = unicodedata.normalize("NFD", (f.filename or "comprobante")).encode("ascii", "ignore").decode("ascii")
@@ -153,7 +152,6 @@ async def upload_payment_receipt(order_id: int):
 
     try:
         _upload_to_storage_with_retry(
-            client=client,
             dest=dest,
             data=data,
             content_type=mime,

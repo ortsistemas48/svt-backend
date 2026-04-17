@@ -54,10 +54,11 @@ def _is_transient_storage_error(exc: Exception) -> bool:
         marker in error_type for marker in ("connecterror", "timeout", "connectionerror")
     )
 
-def _upload_to_storage_with_retry(client: Client, dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
+def _upload_to_storage_with_retry(dest: str, data: bytes, content_type: str, max_retries: int = 3) -> None:
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
+            client = _get_supabase_client()
             client.storage.from_(BUCKET_DOCS).upload(
                 path=dest,
                 file=data,
@@ -147,7 +148,6 @@ async def upload_documents(app_id: int):
     raw_types = form_data.getlist("types") if form_data else []
     norm_types = [_norm_type(t) for t in raw_types]
 
-    client = _get_supabase_client()
     saved = []
 
     for idx, f in enumerate(files):
@@ -170,7 +170,6 @@ async def upload_documents(app_id: int):
 
         try:
             _upload_to_storage_with_retry(
-                client=client,
                 dest=dest,
                 data=data,
                 content_type=f.mimetype or "application/octet-stream",
