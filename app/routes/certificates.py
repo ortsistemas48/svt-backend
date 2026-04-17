@@ -134,13 +134,23 @@ def _upload_pdf_and_get_public_url(data: bytes, path: str, max_retries: int = 3)
             error_msg = str(e).lower()
             error_type = type(e).__name__
             
-            is_ssl_error = any(keyword in error_msg for keyword in [
+            is_transient_network_error = any(keyword in error_msg for keyword in [
                 "ssl", "eof", "protocol", "connection", "timeout", "broken pipe",
-                "_ssl.c", "ssl3", "tls", "socket", "errno", "closed", "reset"
-            ]) or "SSLError" in error_type or "ConnectionError" in error_type
+                "_ssl.c", "ssl3", "tls", "socket", "errno", "closed", "reset",
+                "temporary failure in name resolution", "name resolution", "network is unreachable",
+                "service unavailable", "gateway timeout"
+            ]) or any(keyword in error_type.lower() for keyword in [
+                "sslerror", "connectionerror", "connecterror", "timeouterror", "readtimeout", "writetimeout"
+            ])
             
-            if is_ssl_error and attempt < max_retries - 1:
-                wait_time = (2 ** attempt) + 0.3  # Optimización: reducir tiempos de espera (1.3s, 2.3s, 4.3s)
+            if is_transient_network_error and attempt < max_retries - 1:
+                wait_time = (2 ** attempt) + 0.3  # Backoff exponencial corto para errores transitorios
+                log.warning(
+                    "Error transitorio subiendo certificado a storage (intento %s/%s): %s",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                )
                 time.sleep(wait_time)
                 # Optimización: recrear cliente en caso de error de conexión
                 sb = None
