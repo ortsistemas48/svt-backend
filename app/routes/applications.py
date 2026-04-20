@@ -722,12 +722,14 @@ async def list_full_applications_by_workshop(workshop_id: int):
             o.cuit             AS owner_cuit,
             o.razon_social     AS owner_razon_social,
             o.passport_number  AS owner_passport_number,
+            o.email            AS owner_email,
             d.first_name       AS driver_first_name,
             d.last_name        AS driver_last_name,
             d.dni              AS driver_dni,
             d.cuit             AS driver_cuit,
             d.razon_social     AS driver_razon_social,
             d.passport_number  AS driver_passport_number,
+            d.email            AS driver_email,
             ara.previous_sticker_number AS previous_sticker_number,
             c.license_plate,
             c.brand,
@@ -736,6 +738,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             s.status AS sticker_status,
             i1.created_at AS inspection_1_date,
             i2.created_at AS inspection_2_date,
+            CASE WHEN i2.id IS NOT NULL THEN i2.expiration_date ELSE i1.expiration_date END AS inspection_expiration_date,
             ara.previous_status AS previous_status,
             ara.previous_sticker_number AS previous_sticker_number,
             ara.created_at AS previous_status_date
@@ -772,6 +775,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
             "result_2": r["result_2"],
             "inspection_1_date": r["inspection_1_date"].isoformat() if r["inspection_1_date"] else None,
             "inspection_2_date": r["inspection_2_date"].isoformat() if r["inspection_2_date"] else None,
+            "inspection_expiration_date": r["inspection_expiration_date"].isoformat() if r["inspection_expiration_date"] else None,
             "owner": (
                 {
                     "first_name":      r["owner_first_name"],
@@ -780,6 +784,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                     "cuit":            r["owner_cuit"],
                     "razon_social":    r["owner_razon_social"],
                     "passport_number": r["owner_passport_number"],
+                    "email":           r["owner_email"],
                 }
             ),
             "driver": (
@@ -790,6 +795,7 @@ async def list_full_applications_by_workshop(workshop_id: int):
                     "cuit":            r["driver_cuit"],
                     "razon_social":    r["driver_razon_social"],
                     "passport_number": r["driver_passport_number"],
+                    "email":           r["driver_email"],
                 }
                 if (r["driver_first_name"] or r["driver_last_name"] or r["driver_dni"] is not None)
                 else None
