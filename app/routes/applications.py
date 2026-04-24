@@ -924,6 +924,9 @@ async def report_abandonment(app_id):
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
     
+    is_first_application = False
+    sticker_id = None
+
     async with get_conn_ctx() as conn:
         async with conn.transaction():
             # Obtener la aplicación con FOR UPDATE
@@ -946,77 +949,77 @@ async def report_abandonment(app_id):
                     "error": f"No se puede reportar abandono. El estado actual es '{current_status}', debe ser uno de: {', '.join(allowed_statuses)}"
                 }), 400
             
-            car_id = application["car_id"]
-            
-            if not car_id:
-                return jsonify({"error": "La aplicación no tiene vehículo asociado"}), 400
-            
-            # Obtener datos del vehículo
-            car_data = await conn.fetchrow(
-                """
-                SELECT license_plate, sticker_id
-                FROM cars
-                WHERE id = $1
-                """,
-                car_id
-            )
-            
-            if not car_data:
-                return jsonify({"error": "Vehículo no encontrado"}), 404
-            
-            license_plate = car_data["license_plate"]
-            sticker_id = car_data["sticker_id"]
-            
-            if not license_plate:
-                return jsonify({"error": "El vehículo no tiene patente asociada"}), 400
-            
-            # Verificar si es la primera aplicación para este vehículo
-            # Contar aplicaciones con el mismo car_id, excluyendo la actual
-            other_apps_count = await conn.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM applications
-                WHERE car_id = $1 
-                AND id != $2
-                AND is_deleted IS NOT TRUE
-                """,
-                car_id, app_id
-            )
-            
-            is_first_application = (other_apps_count or 0) == 0
-            
             # Cambiar estado a Abandonado
             await conn.execute(
                 "UPDATE applications SET status = $1 WHERE id = $2",
                 "Abandonado", app_id
             )
+
+            car_id = application["car_id"]
+            if not car_id:
+                # Si no hay vehículo asociado, no se realiza ninguna acción adicional.
+                pass
+            else:
+                # Obtener datos del vehículo
+                car_data = await conn.fetchrow(
+                    """
+                    SELECT license_plate, sticker_id
+                    FROM cars
+                    WHERE id = $1
+                    """,
+                    car_id
+                )
+
+                if not car_data:
+                    return jsonify({"error": "Vehículo no encontrado"}), 404
+
+                license_plate = car_data["license_plate"]
+                sticker_id = car_data["sticker_id"]
+
+                if not license_plate:
+                    return jsonify({"error": "El vehículo no tiene patente asociada"}), 400
+
+                # Verificar si es la primera aplicación para este vehículo
+                # Contar aplicaciones con el mismo car_id, excluyendo la actual
+                other_apps_count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM applications
+                    WHERE car_id = $1
+                    AND id != $2
+                    AND is_deleted IS NOT TRUE
+                    """,
+                    car_id, app_id
+                )
+
+                is_first_application = (other_apps_count or 0) == 0
             
-            # Si hay sticker asignado, manejar según la lógica nueva
-            if sticker_id:
-                if is_first_application:
-                    # Primera revisión: desasignar y cambiar estado según status
-                    await conn.execute(
-                        "UPDATE cars SET sticker_id = NULL WHERE id = $1",
-                        car_id
-                    )
-                    
-                    if current_status == "Pendiente":
+                # Si hay sticker asignado, manejar según la lógica nueva
+                if sticker_id:
+                    if is_first_application:
+                        # Primera revisión: desasignar y cambiar estado según status
                         await conn.execute(
-                            "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                            "UPDATE cars SET sticker_id = NULL WHERE id = $1",
+                            car_id
+                        )
+
+                        if current_status == "Pendiente":
+                            await conn.execute(
+                                "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
+                                sticker_id
+                            )
+                        else:  # 'A Inspeccionar', 'En curso', 'Emitir CRT'
+                            await conn.execute(
+                                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                                sticker_id
+                            )
+                    else:
+                        # NO es primera revisión: mantener asignada y poner en 'En Uso'
+                        await conn.execute(
+                            "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
                             sticker_id
                         )
-                    else:  # 'A Inspeccionar', 'En curso', 'Emitir CRT'
-                        await conn.execute(
-                            "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                            sticker_id
-                        )
-                else:
-                    # NO es primera revisión: mantener asignada y poner en 'En Uso'
-                    await conn.execute(
-                        "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
-                        sticker_id
-                    )
-                    # NO desasignar (mantener sticker_id en cars)
+                        # NO desasignar (mantener sticker_id en cars)
     
     # Determinar qué pasó con la oblea para la respuesta
     sticker_action = None
