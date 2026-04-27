@@ -458,3 +458,37 @@ async def statistics_upcoming_expirations(workshop_id: int):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"Error interno, {e}"}), 500
+
+# ==============================
+# 10) Obleas perdidas
+# ==============================
+@statistics_bp.route("/workshop/<int:workshop_id>/lost-stickers", methods=["GET"])
+async def statistics_lost_stickers(workshop_id: int):
+    try:
+        await _auth()
+        date_from, date_to = _range()
+
+        async with get_conn_ctx() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT s.id) AS c
+                FROM applications a
+                JOIN cars c on c.id = a.car_id
+                JOIN stickers s ON c.sticker_id = s.id
+                WHERE a.workshop_id = $1
+                  AND a.is_deleted IS NOT TRUE
+                  AND a.owner_id IS NOT NULL
+                  AND a.car_id IS NOT NULL
+                  AND a.date::date BETWEEN $2 AND $3
+                  AND s.status = 'No Disponible'
+                """,
+                workshop_id, date_from, date_to
+            )
+        print(f"COUNT: {count}")
+        return jsonify({"count": int(count or 0)}), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Error interno, {e}"}), 500
