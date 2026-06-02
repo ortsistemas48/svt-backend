@@ -1042,6 +1042,8 @@ VEHICLE_TYPE_LABELS = {
     "O4": "Acoplados, semirremolques de más de 10.000 KG",
 }
 
+USAGE_TYPE_D_LABEL_TDF = "De alquiler, con chofer (Taxi, Remis, STUPPE)"
+
 USAGE_TYPE_LABELS = {
     "A":  "Oficial",
     "B":  "Diplomático, Consular u Org. Internacional",
@@ -1062,11 +1064,18 @@ def _vehicle_type_display(code: str | None) -> str:
     label = VEHICLE_TYPE_LABELS.get(c, "")
     return f"{c} - {label}" if label else c
 
-def _usage_type_display(code: str | None) -> str:
+def _is_tierra_del_fuego_province(province_name: str | None) -> bool:
+    prov_norm = _normalize_name(province_name)
+    return bool(prov_norm and "tierra del fuego" in prov_norm)
+
+def _usage_type_display(code: str | None, province_name: str | None = None) -> str:
     c = (code or "").strip().upper()
     if not c:
         return ""
-    label = USAGE_TYPE_LABELS.get(c, "")
+    if c == "D" and _is_tierra_del_fuego_province(province_name):
+        label = USAGE_TYPE_D_LABEL_TDF
+    else:
+        label = USAGE_TYPE_LABELS.get(c, "")
     return f"{c} - {label}" if label else c
 
 def _wrap_to_width(text: str, width: int = 35) -> str:
@@ -1468,7 +1477,10 @@ async def _generate_pdf_only(app_id: int, payload: dict) -> tuple[bytes, str, di
     resultado_segunda_inspeccion = resultado if is_second_inspection else ""
     tipo_puro = (row["vehicle_type"] or "").strip().upper()
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
-    uso_display = _usage_type_display((row["usage_type"] or "").strip())
+    uso_display = _usage_type_display(
+        (row["usage_type"] or "").strip(),
+        row.get("workshop_province"),
+    )
     clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
     clasificacion = _wrap_to_width(clasificacion_base, width=40)
 
@@ -2012,7 +2024,10 @@ async def _do_generate_certificate(app_id: int, payload: dict):
     resultado_segunda_inspeccion = resultado if is_second_inspection else ""
     tipo_puro = (row["vehicle_type"] or "").strip().upper()
     tipo_display = _vehicle_type_display((row["vehicle_type"] or "").strip())
-    uso_display = _usage_type_display((row["usage_type"] or "").strip())
+    uso_display = _usage_type_display(
+        (row["usage_type"] or "").strip(),
+        row.get("workshop_province"),
+    )
     clasificacion_base = "\n".join([t for t in [tipo_display, uso_display] if t])
     clasificacion = _wrap_to_width(clasificacion_base, width=40)
 
