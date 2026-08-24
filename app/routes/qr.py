@@ -1,13 +1,20 @@
+from urllib.parse import unquote
+
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
 
 qr_bp = Blueprint("qr", __name__)
 
-@qr_bp.route("/get-qr-data/<string:sticker_number>", methods=["GET"])
-async def get_qr_data(sticker_number: str):
-    async with get_conn_ctx() as conn:
-        row = await conn.fetchrow(
-            """
+
+def _norm_sticker_number(raw: str) -> str:
+    """RA 1009343, RA%201009343 y RA1009343 se resuelven al mismo valor."""
+    decoded = unquote(unquote(str(raw or ""))).upper()
+    decoded = decoded.replace("%20", " ").replace("+", " ")
+    return "".join(ch for ch in decoded if ch.isalnum())
+
+
+def _sticker_lookup_sql() -> str:
+    return """
             WITH base AS (
               SELECT
                 c.id              AS car_id,
@@ -27,7 +34,7 @@ async def get_qr_data(sticker_number: str):
               LEFT JOIN cars c           ON c.sticker_id = s.id
               LEFT JOIN sticker_orders so ON so.id = s.sticker_order_id
               LEFT JOIN workshop w        ON w.id = so.workshop_id
-              WHERE s.sticker_number = $1
+              WHERE replace(replace(replace(upper(s.sticker_number), '%20', ''), ' ', ''), '+', '') = $1
             )
             SELECT
               b.car_id,
@@ -92,9 +99,22 @@ async def get_qr_data(sticker_number: str):
               ORDER BY i.id ASC
               LIMIT 1
             ) li_second ON TRUE
-            """,
-            sticker_number
-        )
+            """
+
+
+async def _load_qr_row(sticker_number: str):
+    normalized = _norm_sticker_number(sticker_number)
+    if not normalized:
+        return None
+    async with get_conn_ctx() as conn:
+        return await conn.fetchrow(_sticker_lookup_sql(), normalized)
+
+
+@qr_bp.route("/get-qr-data", methods=["GET"])
+@qr_bp.route("/get-qr-data/<path:sticker_number>", methods=["GET"])
+async def get_qr_data(sticker_number: str | None = None):
+    raw = sticker_number or request.args.get("sticker_number") or ""
+    row = await _load_qr_row(raw)
 
     if not row:
         return jsonify({"error": "Sticker no encontrado"}), 404
