@@ -21,6 +21,7 @@ def _sticker_lookup_sql() -> str:
                 c.license_plate,
                 c.brand,
                 c.model,
+                c.usage_type,
                 c.registration_year,
                 s.sticker_number,
                 s.status          AS sticker_status,
@@ -42,6 +43,7 @@ def _sticker_lookup_sql() -> str:
               b.brand,
               b.model,
               b.name,
+              b.usage_type,
               b.registration_year,
               b.sticker_number,
               b.sticker_status,
@@ -126,6 +128,7 @@ async def get_qr_data(sticker_number: str | None = None):
             "brand": row["brand"],
             "model": row["model"],
             "registration_year": row["registration_year"],
+            "usage_type": row["usage_type"],
         }
 
     inspection = None
