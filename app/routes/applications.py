@@ -1,5 +1,10 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
+from app.sticker_events import (
+    record_sticker_loss,
+    record_sticker_release,
+    LOSS_ABANDONO,
+)
 import datetime
 from dateutil import parser
 import pytz
@@ -396,10 +401,17 @@ async def add_or_update_car(app_id):
 
             # Actualizar estados de stickers
             # 1. Liberar el sticker anterior (si existe) - ponerlo como Disponible
-            if old_sticker_id:
+            if old_sticker_id and old_sticker_id != sticker_id:
                 await conn.execute(
                     "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
                     old_sticker_id
+                )
+                await record_sticker_release(
+                    conn,
+                    sticker_id=old_sticker_id,
+                    application_id=app_id,
+                    car_id=old_car_id,
+                    created_by=g.get("user_id"),
                 )
 
             # 2. Marcar el nuevo sticker (del request) como En Uso
@@ -997,6 +1009,12 @@ async def report_abandonment(app_id):
                 # Si hay sticker asignado, manejar según la lógica nueva
                 if sticker_id:
                     if is_first_application:
+                        # Estado previo de la oblea, para el historial
+                        status_before = await conn.fetchval(
+                            "SELECT status FROM stickers WHERE id = $1",
+                            sticker_id
+                        )
+
                         # Primera revisión: desasignar y cambiar estado según status
                         await conn.execute(
                             "UPDATE cars SET sticker_id = NULL WHERE id = $1",
@@ -1008,10 +1026,29 @@ async def report_abandonment(app_id):
                                 "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
                                 sticker_id
                             )
+                            await record_sticker_release(
+                                conn,
+                                sticker_id=sticker_id,
+                                application_id=app_id,
+                                car_id=car_id,
+                                status_before=status_before,
+                                created_by=user_id,
+                            )
                         else:  # 'A Inspeccionar', 'En curso', 'Emitir CRT'
                             await conn.execute(
                                 "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
                                 sticker_id
+                            )
+                            # El vínculo cars.sticker_id ya se rompió, así que este evento
+                            # es el único rastro de que la oblea se perdió por abandono
+                            await record_sticker_loss(
+                                conn,
+                                sticker_id=sticker_id,
+                                reason=LOSS_ABANDONO,
+                                application_id=app_id,
+                                car_id=car_id,
+                                status_before=status_before,
+                                created_by=user_id,
                             )
                     else:
                         # NO es primera revisión: mantener asignada y poner en 'En Uso'

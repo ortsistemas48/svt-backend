@@ -7,6 +7,31 @@ import pytz
 
 statistics_bp = Blueprint("statistics", __name__, url_prefix="/statistics")
 
+AR_TZ_NAME = "America/Argentina/Buenos_Aires"
+
+# applications.date es timestamptz y se escribe en hora argentina, pero la sesión de
+# Postgres corre en UTC. Sin el AT TIME ZONE, toda revisión posterior a las 21:00 AR
+# cae en el día (y a veces en el mes) siguiente.
+APP_DATE_LOCAL = f"(a.date AT TIME ZONE '{AR_TZ_NAME}')::date"
+
+# Filtro base común a todos los endpoints. Estaba copiado a mano en cada query, que es
+# exactamente cómo terminaban divergiendo entre sí.
+APP_SCOPE = f"""
+    a.workshop_id = $1
+    AND a.is_deleted IS NOT TRUE
+    AND a.owner_id IS NOT NULL
+    AND a.car_id IS NOT NULL
+    AND {APP_DATE_LOCAL} BETWEEN $2 AND $3
+"""
+
+# Resultado efectivo del trámite: en una segunda inspección solo se escribe result_2,
+# así que agrupar por result deja a un Condicional que después aprobó contando como
+# Condicional para siempre.
+EFFECTIVE_RESULT = """
+    COALESCE(NULLIF(TRIM(a.result_2), ''), NULLIF(TRIM(a.result), ''))
+"""
+
+
 def _arg_date(name: str, default: datetime.date) -> datetime.date:
     v = (request.args.get(name) or "").strip()
     if not v:
@@ -17,7 +42,7 @@ def _arg_date(name: str, default: datetime.date) -> datetime.date:
         raise ValueError(f"Parametro {name} inválido, usa YYYY-MM-DD")
 
 def _range() -> tuple[datetime.date, datetime.date]:
-    ar = pytz.timezone("America/Argentina/Buenos_Aires")
+    ar = pytz.timezone(AR_TZ_NAME)
     today_ar = datetime.datetime.now(ar).date()
     date_to = _arg_date("to", today_ar)
     date_from = _arg_date("from", date_to - datetime.timedelta(days=13))
@@ -42,26 +67,25 @@ async def statistics_overview(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 WITH base AS (
-                    SELECT *
+                    SELECT
+                      a.status,
+                      {EFFECTIVE_RESULT} AS effective_result
                     FROM applications a
-                    WHERE a.workshop_id = $1
-                      AND a.is_deleted IS NOT TRUE
-                      AND a.owner_id IS NOT NULL
-                      AND a.car_id IS NOT NULL
-                      AND a.date::date BETWEEN $2 AND $3
+                    WHERE {APP_SCOPE}
                 )
                 SELECT
-                  COUNT(*)                                   AS created,
-                  COUNT(CASE WHEN status = 'Completado' THEN 1 END) AS completed,
-                  COUNT(CASE WHEN status = 'En Cola' THEN 1 END)    AS in_queue,
-                  COUNT(CASE WHEN status = 'Completado' AND result = 'Apto' THEN 1 END) AS approved
+                  COUNT(*)                                           AS created,
+                  COUNT(CASE WHEN status = 'Completado' THEN 1 END)  AS completed,
+                  COUNT(CASE WHEN status = 'En Cola' THEN 1 END)     AS in_queue,
+                  COUNT(CASE WHEN status = 'Completado'
+                              AND lower(effective_result) = 'apto' THEN 1 END) AS approved
                 FROM base
                 """,
                 workshop_id, date_from, date_to
             )
-            
+
             # Obtener cantidad de usuarios activos del taller
             active_users_count = await conn.fetchval(
                 """
@@ -110,20 +134,20 @@ async def statistics_daily(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 WITH base AS (
-                  SELECT a.id, a.date::date AS d, a.status, a.result
+                  SELECT
+                    {APP_DATE_LOCAL} AS d,
+                    a.status,
+                    {EFFECTIVE_RESULT} AS effective_result
                   FROM applications a
-                  WHERE a.workshop_id = $1
-                    AND a.is_deleted IS NOT TRUE
-                    AND a.owner_id IS NOT NULL
-                    AND a.car_id IS NOT NULL
-                    AND a.date::date BETWEEN $2 AND $3
+                  WHERE {APP_SCOPE}
                 )
                 SELECT d,
-                  COUNT(*)                                  AS created,
+                  COUNT(*)                                          AS created,
                   COUNT(CASE WHEN status = 'Completado' THEN 1 END) AS completed,
-                  COUNT(CASE WHEN status = 'Completado' AND result = 'Apto' THEN 1 END) AS approved
+                  COUNT(CASE WHEN status = 'Completado'
+                              AND lower(effective_result) = 'apto' THEN 1 END) AS approved
                 FROM base
                 GROUP BY d
                 ORDER BY d
@@ -163,15 +187,11 @@ async def statistics_status_breakdown(workshop_id: int):
         date_from, date_to = _range()
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT status, COUNT(*) AS c
+                f"""
+                SELECT a.status, COUNT(*) AS c
                 FROM applications a
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                GROUP BY status
+                WHERE {APP_SCOPE}
+                GROUP BY a.status
                 ORDER BY c DESC NULLS LAST
                 """,
                 workshop_id, date_from, date_to
@@ -191,21 +211,22 @@ async def statistics_status_breakdown(workshop_id: int):
 # ==============================
 @statistics_bp.route("/workshop/<int:workshop_id>/results-breakdown", methods=["GET"])
 async def statistics_results_breakdown(workshop_id: int):
+    """
+    Agrupa por el resultado *final* del trámite: si hubo segunda inspección manda
+    result_2, si no manda result. 'Condicional Vencido' es una categoría propia y no
+    se suma a 'Condicional'.
+    """
     try:
         await _auth()
         date_from, date_to = _range()
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT result, COUNT(*) AS c
+                f"""
+                SELECT {EFFECTIVE_RESULT} AS result, COUNT(*) AS c
                 FROM applications a
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
+                WHERE {APP_SCOPE}
                   AND a.status = 'Completado'
-                  AND a.date::date BETWEEN $2 AND $3
-                GROUP BY result
+                GROUP BY 1
                 ORDER BY c DESC NULLS LAST
                 """,
                 workshop_id, date_from, date_to
@@ -233,17 +254,16 @@ async def statistics_top_models(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT c.brand, c.model, COUNT(*) AS c
+                f"""
+                SELECT
+                  MIN(TRIM(c.brand)) AS brand,
+                  MIN(TRIM(c.model)) AS model,
+                  COUNT(*) AS c
                 FROM applications a
                 JOIN cars c ON c.id = a.car_id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                  AND (NULLIF(trim(c.model), '') IS NOT NULL OR NULLIF(trim(c.brand), '') IS NOT NULL)
-                GROUP BY c.brand, c.model
+                WHERE {APP_SCOPE}
+                  AND (NULLIF(TRIM(c.model), '') IS NOT NULL OR NULLIF(TRIM(c.brand), '') IS NOT NULL)
+                GROUP BY UPPER(TRIM(COALESCE(c.brand, ''))), UPPER(TRIM(COALESCE(c.model, '')))
                 ORDER BY c DESC NULLS LAST
                 LIMIT $4
                 """,
@@ -272,17 +292,13 @@ async def statistics_top_brands(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT c.brand, COUNT(*) AS c
+                f"""
+                SELECT MIN(TRIM(c.brand)) AS brand, COUNT(*) AS c
                 FROM applications a
                 JOIN cars c ON c.id = a.car_id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                  AND NULLIF(trim(c.brand), '') IS NOT NULL
-                GROUP BY c.brand
+                WHERE {APP_SCOPE}
+                  AND NULLIF(TRIM(c.brand), '') IS NOT NULL
+                GROUP BY UPPER(TRIM(c.brand))
                 ORDER BY c DESC NULLS LAST
                 LIMIT $4
                 """,
@@ -298,6 +314,9 @@ async def statistics_top_brands(workshop_id: int):
     except Exception as e:
         return jsonify({"error": f"Error interno, {e}"}), 500
 
+# ==============================
+# 7) Tipos de uso
+# ==============================
 @statistics_bp.route("/workshop/<int:workshop_id>/usage-types", methods=["GET"])
 async def statistics_usage_types(workshop_id: int):
     try:
@@ -306,17 +325,13 @@ async def statistics_usage_types(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT c.usage_type, COUNT(*) AS c
+                f"""
+                SELECT UPPER(TRIM(c.usage_type)) AS usage_type, COUNT(*) AS c
                 FROM applications a
                 JOIN cars c ON c.id = a.car_id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                  AND NULLIF(trim(c.usage_type), '') IS NOT NULL
-                GROUP BY c.usage_type
+                WHERE {APP_SCOPE}
+                  AND NULLIF(TRIM(c.usage_type), '') IS NOT NULL
+                GROUP BY UPPER(TRIM(c.usage_type))
                 ORDER BY c DESC NULLS LAST
                 """,
                 workshop_id, date_from, date_to
@@ -337,6 +352,14 @@ async def statistics_usage_types(workshop_id: int):
 # ==============================
 @statistics_bp.route("/workshop/<int:workshop_id>/common-errors", methods=["GET"])
 async def statistics_common_errors(workshop_id: int):
+    """
+    Cuenta revisiones (no filas de inspection_details) con al menos un paso en
+    Condicional o Rechazado, para que un paso que falla en la primera y en la segunda
+    inspección de la misma revisión cuente como un caso y no como dos.
+
+    `total` es el total real de casos, no el de los items devueltos: los porcentajes
+    antes se calculaban sobre el top-N y por eso siempre sumaban ~100%.
+    """
     try:
         await _auth()
         date_from, date_to = _range()
@@ -345,37 +368,42 @@ async def statistics_common_errors(workshop_id: int):
 
         async with get_conn_ctx() as conn:
             rows = await conn.fetch(
-                """
-                SELECT s.name AS step_name, COUNT(*) AS c
-                FROM applications a
-                JOIN inspections i ON i.application_id = a.id
-                JOIN inspection_details idet ON idet.inspection_id = i.id
-                JOIN steps s ON s.id = idet.step_id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                  AND idet.status IN ('Condicional', 'Rechazado')
-                  AND NULLIF(trim(s.name), '') IS NOT NULL
-                GROUP BY s.name
+                f"""
+                WITH errs AS (
+                  SELECT TRIM(s.name) AS step_name, COUNT(DISTINCT a.id) AS c
+                  FROM applications a
+                  JOIN inspections i ON i.application_id = a.id
+                  JOIN inspection_details idet ON idet.inspection_id = i.id
+                  JOIN steps s ON s.id = idet.step_id
+                  WHERE {APP_SCOPE}
+                    AND idet.status IN ('Condicional', 'Rechazado')
+                    AND NULLIF(TRIM(s.name), '') IS NOT NULL
+                  GROUP BY TRIM(s.name)
+                )
+                SELECT step_name, c, SUM(c) OVER () AS total_all
+                FROM errs
                 ORDER BY c DESC NULLS LAST
                 LIMIT $4
                 """,
                 workshop_id, date_from, date_to, limit
             )
-        total_errors = sum(int(r["c"]) for r in rows)
+
+        total_all = int(rows[0]["total_all"]) if rows else 0
         items = []
         for r in rows:
             count = int(r["c"])
-            percentage = round((count / total_errors) * 100) if total_errors > 0 else 0
+            percentage = round((count / total_all) * 100) if total_all > 0 else 0
             items.append({
                 "step_name": r["step_name"] or "Sin dato",
                 "count": count,
                 "percentage": percentage
             })
 
-        return jsonify({"items": items, "total": total_errors}), 200
+        return jsonify({
+            "items": items,
+            "total": total_all,
+            "total_shown": sum(i["count"] for i in items),
+        }), 200
     except PermissionError as e:
         return jsonify({"error": str(e)}), 401
     except ValueError as e:
@@ -393,7 +421,7 @@ async def statistics_upcoming_expirations(workshop_id: int):
         limit = request.args.get("limit", 3, type=int)
         limit = max(1, min(limit, 20))
 
-        ar = pytz.timezone("America/Argentina/Buenos_Aires")
+        ar = pytz.timezone(AR_TZ_NAME)
         today_ar = datetime.datetime.now(ar).date()
         max_date = today_ar + datetime.timedelta(days=90)
 
@@ -438,12 +466,12 @@ async def statistics_upcoming_expirations(workshop_id: int):
             if exp_date:
                 exp_date_obj = exp_date if isinstance(exp_date, datetime.date) else parser.parse(str(exp_date)).date()
                 days_until = (exp_date_obj - today_ar).days
-                
+
                 contact = r["phone_number"] or r["email"] or r["name"] or "Sin contacto"
                 contact_type = "Tel" if r["phone_number"] else ("Email" if r["email"] else "Nombre")
                 if contact_type == "Tel" and not contact.startswith("Tel:"):
                     contact = f"Tel: {contact}"
-                
+
                 items.append({
                     "license_plate": r["license_plate"] or "N/D",
                     "contact": contact,
@@ -460,32 +488,57 @@ async def statistics_upcoming_expirations(workshop_id: int):
         return jsonify({"error": f"Error interno, {e}"}), 500
 
 # ==============================
-# 10) Obleas perdidas
+# 10) Obleas perdidas, con desglose por motivo
 # ==============================
 @statistics_bp.route("/workshop/<int:workshop_id>/lost-stickers", methods=["GET"])
 async def statistics_lost_stickers(workshop_id: int):
+    """
+    Se lee del historial `sticker_events`, no del estado actual de `stickers`.
+
+    Antes se unía applications -> cars -> stickers por cars.sticker_id, pero el abandono
+    y el condicional vencido ponen cars.sticker_id = NULL antes de marcar la oblea, así
+    que esas pérdidas nunca se contaban. Además el filtro de fecha caía sobre la fecha de
+    la revisión y no sobre la fecha de la baja, y `stickers.status` es el estado actual,
+    con lo cual un mes ya cerrado podía cambiar hacia atrás.
+
+    Se toma la última pérdida de cada oblea dentro del rango, así el desglose suma
+    exactamente al total y ninguna oblea cuenta dos veces.
+    """
     try:
         await _auth()
         date_from, date_to = _range()
 
         async with get_conn_ctx() as conn:
-            count = await conn.fetchval(
-                """
-                SELECT COUNT(DISTINCT s.id) AS c
-                FROM applications a
-                JOIN cars c on c.id = a.car_id
-                JOIN stickers s ON c.sticker_id = s.id
-                WHERE a.workshop_id = $1
-                  AND a.is_deleted IS NOT TRUE
-                  AND a.owner_id IS NOT NULL
-                  AND a.car_id IS NOT NULL
-                  AND a.date::date BETWEEN $2 AND $3
-                  AND s.status = 'No Disponible'
+            rows = await conn.fetch(
+                f"""
+                WITH last_loss AS (
+                    SELECT DISTINCT ON (e.sticker_id) e.sticker_id, e.reason
+                    FROM sticker_events e
+                    WHERE e.workshop_id = $1
+                      AND e.event = 'Perdida'
+                      AND (e.created_at AT TIME ZONE '{AR_TZ_NAME}')::date BETWEEN $2 AND $3
+                    ORDER BY e.sticker_id, e.created_at DESC
+                )
+                SELECT COALESCE(NULLIF(TRIM(reason), ''), 'Sin clasificar') AS reason,
+                       COUNT(*) AS c
+                FROM last_loss
+                GROUP BY 1
+                ORDER BY c DESC
                 """,
                 workshop_id, date_from, date_to
             )
-        print(f"COUNT: {count}")
-        return jsonify({"count": int(count or 0)}), 200
+
+        total = sum(int(r["c"]) for r in rows)
+        items = []
+        for r in rows:
+            count = int(r["c"])
+            items.append({
+                "reason": r["reason"],
+                "count": count,
+                "percentage": round((count / total) * 100) if total > 0 else 0,
+            })
+
+        return jsonify({"count": total, "items": items}), 200
     except PermissionError as e:
         return jsonify({"error": str(e)}), 401
     except ValueError as e:

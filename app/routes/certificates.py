@@ -26,6 +26,7 @@ except Exception:
 
 from app.jobs import new_job, get_job, run_job
 from app.email import send_certificate_email
+from app.sticker_events import record_sticker_loss, LOSS_RECHAZADO
 import logging
 
 log = logging.getLogger(__name__)
@@ -1648,10 +1649,24 @@ async def _update_application_background(app_id: int, pdf_bytes: bytes, file_nam
                     # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
                     # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
                     if prev_completed_count == 0:
-                        await conn.execute(
-                            "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                            row["sticker_id"]
-                        )
+                        # Estado e historial en la misma transacción, para que no diverjan
+                        async with conn.transaction():
+                            status_before = await conn.fetchval(
+                                "SELECT status FROM stickers WHERE id = $1",
+                                row["sticker_id"]
+                            )
+                            await conn.execute(
+                                "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                                row["sticker_id"]
+                            )
+                            await record_sticker_loss(
+                                conn,
+                                sticker_id=row["sticker_id"],
+                                reason=LOSS_RECHAZADO,
+                                application_id=app_id,
+                                car_id=car_id_result,
+                                status_before=status_before,
+                            )
     except Exception as e:
         log.exception("Error actualizando sticker para aplicación %s: %s", app_id, e)
 
@@ -1846,10 +1861,24 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
                 # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
                 if prev_completed_count == 0:
-                    await conn.execute(
-                        "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
-                        row["sticker_id"]
-                    )
+                    # Estado e historial en la misma transacción, para que no diverjan
+                    async with conn.transaction():
+                        status_before = await conn.fetchval(
+                            "SELECT status FROM stickers WHERE id = $1",
+                            row["sticker_id"]
+                        )
+                        await conn.execute(
+                            "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
+                            row["sticker_id"]
+                        )
+                        await record_sticker_loss(
+                            conn,
+                            sticker_id=row["sticker_id"],
+                            reason=LOSS_RECHAZADO,
+                            application_id=app_id,
+                            car_id=car_id_result,
+                            status_before=status_before,
+                        )
 
         # Actualizar created_at de la inspección a la fecha actual (zona horaria Argentina)
         if insp and insp.get("id"):

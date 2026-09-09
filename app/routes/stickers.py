@@ -1,6 +1,11 @@
 # stickers_bp.py
-from quart import Blueprint, request, jsonify
+from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
+from app.sticker_events import (
+    record_sticker_loss,
+    record_sticker_release,
+    LOSS_MANUAL,
+)
 from datetime import date, datetime
 
 stickers_bp = Blueprint("stickers", __name__, url_prefix="/stickers")
@@ -233,10 +238,19 @@ async def unassign_sticker_from_car():
 
     async with get_conn_ctx() as conn:
         async with conn.transaction():
-            old_sticker = await conn.fetchval(
-                "SELECT sticker_id FROM cars WHERE license_plate = $1",
+            car = await conn.fetchrow(
+                "SELECT id, sticker_id FROM cars WHERE license_plate = $1",
                 license_plate
             )
+            car_id = car["id"] if car else None
+            old_sticker = car["sticker_id"] if car else None
+
+            status_before = None
+            if old_sticker:
+                status_before = await conn.fetchval(
+                    "SELECT status FROM stickers WHERE id = $1",
+                    old_sticker
+                )
 
             await conn.execute(
                 "UPDATE cars SET sticker_id = NULL WHERE license_plate = $1",
@@ -248,10 +262,25 @@ async def unassign_sticker_from_car():
                     "UPDATE stickers SET status = 'Disponible' WHERE id = $1",
                     old_sticker
                 )
+                await record_sticker_release(
+                    conn,
+                    sticker_id=old_sticker,
+                    car_id=car_id,
+                    status_before=status_before,
+                    created_by=g.get("user_id"),
+                )
             elif set_available == False and old_sticker:
                 await conn.execute(
                     "UPDATE stickers SET status = 'No Disponible' WHERE id = $1",
                     old_sticker
+                )
+                await record_sticker_loss(
+                    conn,
+                    sticker_id=old_sticker,
+                    reason=LOSS_MANUAL,
+                    car_id=car_id,
+                    status_before=status_before,
+                    created_by=g.get("user_id"),
                 )
 
     return jsonify({"ok": True})
@@ -461,13 +490,41 @@ async def set_sticker_status(sticker_id: int):
         }), 400
 
     async with get_conn_ctx() as conn:
-        row = await conn.fetchrow(
-            "UPDATE stickers SET status = $1 WHERE id = $2 RETURNING id, status",
-            status, sticker_id
-        )
+        async with conn.transaction():
+            status_before = await conn.fetchval(
+                "SELECT status FROM stickers WHERE id = $1 FOR UPDATE",
+                sticker_id
+            )
 
-    if not row:
-        return jsonify({"error": "sticker no encontrado"}), 404
+            row = await conn.fetchrow(
+                "UPDATE stickers SET status = $1 WHERE id = $2 RETURNING id, status",
+                status, sticker_id
+            )
+
+            if not row:
+                return jsonify({"error": "sticker no encontrado"}), 404
+
+            if status_before != status:
+                car_id = await conn.fetchval(
+                    "SELECT id FROM cars WHERE sticker_id = $1", sticker_id
+                )
+                if status == "No Disponible":
+                    await record_sticker_loss(
+                        conn,
+                        sticker_id=sticker_id,
+                        reason=LOSS_MANUAL,
+                        car_id=car_id,
+                        status_before=status_before,
+                        created_by=g.get("user_id"),
+                    )
+                elif status == "Disponible":
+                    await record_sticker_release(
+                        conn,
+                        sticker_id=sticker_id,
+                        car_id=car_id,
+                        status_before=status_before,
+                        created_by=g.get("user_id"),
+                    )
 
     return jsonify({"ok": True, "sticker_id": row["id"], "status": row["status"]}), 200
 
