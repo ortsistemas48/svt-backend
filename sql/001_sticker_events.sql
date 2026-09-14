@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS sticker_events (
   reason         text,                   -- 'Abandono' | 'Condicional Vencido' | 'Rechazado' | 'Baja Manual'
   status_before  text,
   status_after   text,
-  created_by     bigint,                 -- user_id; NULL cuando lo dispara el cron
+  created_by     uuid,                   -- users.id; NULL cuando lo dispara el cron
   is_backfill    boolean     NOT NULL DEFAULT false,
   created_at     timestamptz NOT NULL DEFAULT now()
 );

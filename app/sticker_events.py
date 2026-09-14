@@ -1,6 +1,6 @@
 # app/sticker_events.py
 """
-Historial de obleas.
+Dominio de obleas: historial de eventos y la regla de "oblea pegada".
 
 La tabla `stickers` solo guarda el estado actual, y varios flujos (abandono,
 condicional vencido) rompen el vínculo `cars.sticker_id` antes de marcar la oblea
@@ -9,6 +9,10 @@ cuándo se perdió una oblea, así que cada transición relevante se persiste ac
 
 Siempre se recibe la conexión del llamador para que el evento quede dentro de la
 misma transacción que el UPDATE sobre stickers, y estado e historial no diverjan.
+
+Acá vive también `sticker_was_applied`, que es la pregunta que los tres flujos de
+pérdida necesitan antes de dar de baja una oblea. Está centralizada porque la
+respondían por separado y con la regla equivocada.
 """
 import logging
 
@@ -28,6 +32,49 @@ LOSS_MANUAL = "Baja Manual"
 LOSS_REASONS = (LOSS_ABANDONO, LOSS_CONDICIONAL, LOSS_RECHAZADO, LOSS_MANUAL)
 
 
+async def sticker_was_applied(conn, *, car_id: int, before_application_id: int) -> bool:
+    """
+    ¿Alguna revisión previa del auto dejó la oblea pegada en el parabrisas?
+
+    La oblea se pega cuando la revisión da Apto, o cuando al Condicional se le
+    efectúa la segunda revisión. No alcanza con que exista una revisión previa
+    completada, que es lo que preguntaban antes los flujos de pérdida: un
+    'Condicional Vencido' está Completado pero nunca llegó a pegar la oblea, y
+    contarlo como pegada hacía que la oblea de la revisión siguiente no se diera
+    de baja y quedara 'En Uso' para siempre.
+
+    Solo mira revisiones anteriores a `before_application_id`, que es la que se
+    está por resolver.
+    """
+    if not car_id or not before_application_id:
+        return False
+
+    return await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM applications a
+            WHERE a.car_id = $1
+              AND a.id < $2
+              AND a.status = 'Completado'
+              AND a.is_deleted IS NOT TRUE
+              AND (
+                TRIM(a.result) = 'Apto'
+                OR (
+                  TRIM(a.result) = 'Condicional'
+                  AND EXISTS (
+                    SELECT 1 FROM inspections i
+                    WHERE i.application_id = a.id
+                      AND COALESCE(i.is_second, FALSE) = TRUE
+                  )
+                )
+              )
+        )
+        """,
+        car_id, before_application_id,
+    )
+
+
 async def record_sticker_event(
     conn,
     *,
@@ -39,7 +86,7 @@ async def record_sticker_event(
     car_id: int | None = None,
     status_before: str | None = None,
     status_after: str | None = None,
-    created_by: int | None = None,
+    created_by: str | None = None,
 ) -> int | None:
     """
     Registra un evento de oblea. Devuelve el id del evento, o None si no se pudo
@@ -74,7 +121,7 @@ async def record_sticker_event(
             sticker_id, workshop_id, application_id, car_id,
             event, reason, status_before, status_after, created_by
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid)
         RETURNING id
         """,
         sticker_id, workshop_id, application_id, car_id,

@@ -5,7 +5,7 @@ Protegidos por API key via header X-Api-Key.
 from quart import Blueprint, request, jsonify, current_app
 
 from app.db import get_conn_ctx
-from app.sticker_events import record_sticker_loss, LOSS_CONDICIONAL
+from app.sticker_events import record_sticker_loss, sticker_was_applied, LOSS_CONDICIONAL
 
 cron_bp = Blueprint("cron", __name__)
 
@@ -109,8 +109,13 @@ async def get_condicional_expired():
                         app_id,
                     )
                     applications_updated.append(app_id)
-                    if app_count == 1:
-                        # Primera vez del vehículo: desasignar oblea y marcar sticker
+                    # Antes se pedía app_count == 1, es decir "primera vez del vehículo".
+                    # Eso dejaba la oblea intacta cuando el auto ya tenía un
+                    # 'Condicional Vencido' previo, que nunca llegó a pegar ninguna oblea.
+                    if not await sticker_was_applied(
+                        conn, car_id=car_id, before_application_id=app_id
+                    ):
+                        # La oblea nunca se pegó: desasignar y marcar sticker
                         status_before = await conn.fetchval(
                             "SELECT status FROM stickers WHERE id = $1",
                             sticker_id,
@@ -140,7 +145,7 @@ async def get_condicional_expired():
                             created_by=None,  # lo dispara el cron, no un usuario
                         )
                         stickers_updated.append(sticker_id)
-                    # Si app_count > 1 y no hay posteriores: no se toca la oblea
+                    # Si alguna revisión previa ya dejó la oblea pegada: no se toca
 
     items = [
         {

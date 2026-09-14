@@ -26,7 +26,7 @@ except Exception:
 
 from app.jobs import new_job, get_job, run_job
 from app.email import send_certificate_email
-from app.sticker_events import record_sticker_loss, LOSS_RECHAZADO
+from app.sticker_events import record_sticker_loss, sticker_was_applied, LOSS_RECHAZADO
 import logging
 
 log = logging.getLogger(__name__)
@@ -1612,43 +1612,30 @@ async def _update_application_background(app_id: int, pdf_bytes: bytes, file_nam
     Actualiza la aplicación en segundo plano (el PDF ya fue subido).
     """
 
-    # Actualizar sticker si es rechazado (solo si es la primera revisión del vehículo)
+    # Si da Rechazado, la oblea se pierde salvo que ya esté pegada en el parabrisas.
     # Casos cubiertos:
     # 1. Primera revisión da Rechazado → marca sticker como No Disponible
     # 2. Primera revisión Condicional, segunda Rechazado → marca sticker como No Disponible
-    # 3. Si ya tiene revisiones previas completadas (Apto, Condicional, etc.) y luego da Rechazado → NO marca (se queda en uso)
+    # 3. Si una revisión previa dejó la oblea pegada (Apto, o Condicional con segunda
+    #    revisión hecha) → NO marca, la oblea se queda en uso
     # 4. Si ya había dado Rechazado antes → no modifica el sticker (ya debería estar No Disponible)
     condicion = metadata["condicion"]
     row = metadata["row"]
     try:
-        async with get_conn_ctx() as conn: 
-            # Verificar si es la primera revisión del vehículo cuando da rechazado
+        async with get_conn_ctx() as conn:
             if condicion == "Rechazado" and row.get("sticker_id"):
                 # Obtener el car_id de la aplicación actual
                 car_id_result = await conn.fetchval(
                     "SELECT car_id FROM applications WHERE id = $1",
                     app_id
                 )
-                
+
                 if car_id_result:
-                    # Verificar si hay aplicaciones previas completadas para el mismo vehículo
-                    # Si hay aplicaciones previas completadas, el sticker ya estaba en uso, no se marca como No Disponible
-                    prev_completed_count = await conn.fetchval(
-                        """
-                        SELECT COUNT(*) 
-                        FROM applications 
-                        WHERE car_id = $1 
-                          AND status = 'Completado'
-                          AND id < $2
-                        """,
-                        car_id_result,
-                        app_id
-                    )
-                    
-                    # Solo actualizar sticker si es la primera revisión del vehículo (no hay aplicaciones previas completadas)
-                    # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
-                    # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
-                    if prev_completed_count == 0:
+                    # Antes se contaban las revisiones previas completadas, pero eso daba
+                    # por pegada la oblea de un 'Condicional Vencido', que nunca se pegó.
+                    if not await sticker_was_applied(
+                        conn, car_id=car_id_result, before_application_id=app_id
+                    ):
                         # Estado e historial en la misma transacción, para que no diverjan
                         async with conn.transaction():
                             status_before = await conn.fetchval(
@@ -1829,11 +1816,12 @@ async def _do_generate_certificate(app_id: int, payload: dict):
         # Determinar si es segunda inspección antes de actualizar sticker
         is_second_inspection = bool(insp and insp.get("is_second"))
         
-        # Actualizar sticker solo si es la primera revisión del vehículo cuando da rechazado
+        # Si da Rechazado, la oblea se pierde salvo que ya esté pegada en el parabrisas.
         # Casos cubiertos:
         # 1. Primera revisión da Rechazado → marca sticker como No Disponible
         # 2. Primera revisión Condicional, segunda Rechazado → marca sticker como No Disponible
-        # 3. Si ya tiene revisiones previas completadas (Apto, Condicional, etc.) y luego da Rechazado → NO marca (se queda en uso)
+        # 3. Si una revisión previa dejó la oblea pegada (Apto, o Condicional con segunda
+        #    revisión hecha) → NO marca, la oblea se queda en uso
         # 4. Si ya había dado Rechazado antes → no modifica el sticker (ya debería estar No Disponible)
         if condicion == "Rechazado" and row.get("sticker_id"):
             # Obtener el car_id de la aplicación actual
@@ -1841,26 +1829,13 @@ async def _do_generate_certificate(app_id: int, payload: dict):
                 "SELECT car_id FROM applications WHERE id = $1",
                 app_id
             )
-            
+
             if car_id_result:
-                # Verificar si hay aplicaciones previas completadas para el mismo vehículo
-                # Si hay aplicaciones previas completadas, el sticker ya estaba en uso, no se marca como No Disponible
-                prev_completed_count = await conn.fetchval(
-                    """
-                    SELECT COUNT(*) 
-                    FROM applications 
-                    WHERE car_id = $1 
-                      AND status = 'Completado'
-                      AND id < $2
-                    """,
-                    car_id_result,
-                    app_id
-                )
-                
-                # Solo actualizar sticker si es la primera revisión del vehículo (no hay aplicaciones previas completadas)
-                # Esto cubre: primera revisión rechazado, o primera condicional + segunda rechazado
-                # Si ya tiene revisiones previas (Apto, Condicional, etc.), el sticker se queda en uso
-                if prev_completed_count == 0:
+                # Antes se contaban las revisiones previas completadas, pero eso daba
+                # por pegada la oblea de un 'Condicional Vencido', que nunca se pegó.
+                if not await sticker_was_applied(
+                    conn, car_id=car_id_result, before_application_id=app_id
+                ):
                     # Estado e historial en la misma transacción, para que no diverjan
                     async with conn.transaction():
                         status_before = await conn.fetchval(

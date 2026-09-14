@@ -3,6 +3,7 @@ from app.db import get_conn_ctx
 from app.sticker_events import (
     record_sticker_loss,
     record_sticker_release,
+    sticker_was_applied,
     LOSS_ABANDONO,
 )
 import datetime
@@ -926,17 +927,18 @@ async def report_abandonment(app_id):
     Acepta aplicaciones con estado 'Pendiente', 'A Inspeccionar', 'En curso' o 'Emitir CRT'.
     
     Lógica de manejo de oblea:
-    - Si es la primera revisión:
+    - Si ninguna revisión previa dejó la oblea pegada en el parabrisas
+      (ver `sticker_was_applied`):
       * Estado 'Pendiente': desasigna la oblea y la marca como 'Disponible'
       * Otros estados ('A Inspeccionar', 'En curso', 'Emitir CRT'): desasigna la oblea y la marca como 'No Disponible'
-    - Si NO es la primera revisión:
+    - Si la oblea ya está pegada:
       * Mantiene la oblea asignada al vehículo y la marca como 'En Uso' (sin desasignar)
     """
     user_id = g.get("user_id")
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
     
-    is_first_application = False
+    oblea_pegada = True
     sticker_id = None
 
     async with get_conn_ctx() as conn:
@@ -991,31 +993,23 @@ async def report_abandonment(app_id):
                 if not license_plate:
                     return jsonify({"error": "El vehículo no tiene patente asociada"}), 400
 
-                # Verificar si es la primera aplicación para este vehículo
-                # Contar aplicaciones con el mismo car_id, excluyendo la actual
-                other_apps_count = await conn.fetchval(
-                    """
-                    SELECT COUNT(*)
-                    FROM applications
-                    WHERE car_id = $1
-                    AND id != $2
-                    AND is_deleted IS NOT TRUE
-                    """,
-                    car_id, app_id
+                # Antes se contaba cualquier otra aplicación del vehículo para decidir si la
+                # oblea ya estaba pegada, pero una revisión previa que terminó en
+                # 'Condicional Vencido' nunca llegó a pegarla.
+                oblea_pegada = await sticker_was_applied(
+                    conn, car_id=car_id, before_application_id=app_id
                 )
 
-                is_first_application = (other_apps_count or 0) == 0
-            
                 # Si hay sticker asignado, manejar según la lógica nueva
                 if sticker_id:
-                    if is_first_application:
+                    if not oblea_pegada:
                         # Estado previo de la oblea, para el historial
                         status_before = await conn.fetchval(
                             "SELECT status FROM stickers WHERE id = $1",
                             sticker_id
                         )
 
-                        # Primera revisión: desasignar y cambiar estado según status
+                        # La oblea nunca se pegó: desasignar y cambiar estado según status
                         await conn.execute(
                             "UPDATE cars SET sticker_id = NULL WHERE id = $1",
                             car_id
@@ -1051,7 +1045,7 @@ async def report_abandonment(app_id):
                                 created_by=user_id,
                             )
                     else:
-                        # NO es primera revisión: mantener asignada y poner en 'En Uso'
+                        # La oblea ya está pegada en el parabrisas: mantener asignada y en 'En Uso'
                         await conn.execute(
                             "UPDATE stickers SET status = 'En Uso' WHERE id = $1",
                             sticker_id
@@ -1061,17 +1055,18 @@ async def report_abandonment(app_id):
     # Determinar qué pasó con la oblea para la respuesta
     sticker_action = None
     if sticker_id:
-        if is_first_application:
+        if not oblea_pegada:
             if current_status == "Pendiente":
                 sticker_action = "unassigned_disponible"
             else:
                 sticker_action = "unassigned_no_disponible"
         else:
             sticker_action = "kept_assigned_en_uso"
-    
+
     return jsonify({
         "message": "Abandono reportado exitosamente",
-        "is_first_application": is_first_application,
+        # Nombre viejo de la clave: hoy significa "la oblea no estaba pegada todavía"
+        "is_first_application": not oblea_pegada,
         "sticker_action": sticker_action,
         "sticker_unassigned": sticker_action in ["unassigned_disponible", "unassigned_no_disponible"] if sticker_action else False
     }), 200
