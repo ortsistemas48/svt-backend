@@ -2,6 +2,13 @@
 from quart import Blueprint, request, jsonify, g
 from app.db import get_conn_ctx
 from app.email import send_payment_order_approved_email, send_admin_payment_order_created_email
+from app.pricing import (
+    MIN_QUANTITY,
+    MAX_QUANTITY,
+    ZONE_BY_PROVINCE,
+    zone_for_province,
+    unit_price_for_zone,
+)
 import logging
 import asyncio
 
@@ -18,6 +25,27 @@ REJECTED = "REJECTED"
 OWNER_ROLE_ID = 2
 
 # Helpers
+def _parse_int(value):
+    """Convierte a int sólo valores enteros válidos (rechaza 250.7, 'abc', True)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
+def _quote(province, quantity: int):
+    """Devuelve (zone, unit_price, amount) calculados en el servidor."""
+    zone = zone_for_province(province)
+    unit_price = unit_price_for_zone(zone)
+    amount = unit_price * quantity
+    return zone, float(unit_price), float(amount)
+
+
 async def _user_belongs_to_workshop(conn, user_id: int, workshop_id: int) -> bool:
     return await conn.fetchval(
         """
@@ -56,6 +84,30 @@ async def list_orders():
 
     return jsonify([dict(r) for r in rows]), 200
 
+# Cotización vigente para un taller (zona, precio unitario y límites de cantidad)
+@payments_bp.route("/pricing", methods=["GET"])
+async def get_pricing():
+    workshop_id = request.args.get("workshop_id", type=int)
+    if not workshop_id:
+        return jsonify({"error": "workshop_id requerido"}), 400
+
+    user_id = g.get("user_id")
+    if not user_id:
+        return jsonify({"error": "No autorizado"}), 401
+
+    async with get_conn_ctx() as conn:
+        if not await _user_belongs_to_workshop(conn, user_id, workshop_id):
+            return jsonify({"error": "No tenés acceso a este taller"}), 403
+        province = await conn.fetchval("SELECT province FROM workshop WHERE id = $1", workshop_id)
+
+    zone, unit_price, _ = _quote(province, MIN_QUANTITY)
+    return jsonify({
+        "zone": zone,
+        "unit_price": unit_price,
+        "min_quantity": MIN_QUANTITY,
+        "max_quantity": MAX_QUANTITY,
+    }), 200
+
 # Crear orden pendiente
 @payments_bp.route("/orders", methods=["POST"])
 async def create_order():
@@ -63,22 +115,24 @@ async def create_order():
     if not user_id:
         return jsonify({"error": "No autorizado"}), 401
 
-    data = await request.get_json() or {}
-    workshop_id = data.get("workshop_id")
-    quantity = int(data.get("quantity") or 0)
-    zone = (data.get("zone") or "").upper()
-    unit_price = float(data.get("unit_price") or 0)
-    amount = float(data.get("amount") or 0)
-    status_param = (data.get("status") or "").upper()
+    data = await request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Body inválido"}), 400
 
-    if not workshop_id:
+    # Zona, precio unitario y total se calculan SIEMPRE en el servidor.
+    # Cualquier "zone", "unit_price" o "amount" enviado por el cliente se ignora.
+    workshop_id = _parse_int(data.get("workshop_id"))
+    quantity = _parse_int(data.get("quantity"))
+    status_param = str(data.get("status") or "").upper()
+
+    if not workshop_id or workshop_id <= 0:
         return jsonify({"error": "workshop_id requerido"}), 400
-    if quantity < 250:
-        return jsonify({"error": "La cantidad mínima es 250"}), 400
-    if zone not in ("SUR", "CENTRO", "NORTE"):
-        return jsonify({"error": "Zona inválida"}), 400
-    if unit_price <= 0 or amount <= 0:
-        return jsonify({"error": "Montos inválidos"}), 400
+    if quantity is None:
+        return jsonify({"error": "Cantidad inválida"}), 400
+    if quantity < MIN_QUANTITY:
+        return jsonify({"error": f"La cantidad mínima es {MIN_QUANTITY}"}), 400
+    if quantity > MAX_QUANTITY:
+        return jsonify({"error": f"La cantidad máxima es {MAX_QUANTITY}"}), 400
 
     # Determinar el estado inicial de la orden
     # Si status no se envía o es "PENDING" → crear orden como "Pendiente de pago" (PENDING)
@@ -95,8 +149,14 @@ async def create_order():
         if not await _user_belongs_to_workshop(conn, user_id, workshop_id):
             return jsonify({"error": "No tenés acceso a este taller"}), 403
 
-        ws = await conn.fetchrow("SELECT name FROM workshop WHERE id = $1", workshop_id)
-        ws_name = ws["name"] if ws else None
+        ws = await conn.fetchrow("SELECT name, province FROM workshop WHERE id = $1", workshop_id)
+        if not ws:
+            return jsonify({"error": "Taller no encontrado"}), 404
+        ws_name = ws["name"]
+
+        zone, unit_price, amount = _quote(ws["province"], quantity)
+        if (ws["province"] or "").strip() not in ZONE_BY_PROVINCE:
+            log.warning("Provincia sin zona mapeada para taller %s: %r", workshop_id, ws["province"])
 
         row = await conn.fetchrow(
             """
